@@ -1,0 +1,13 @@
+{
+  "name": "hadith-checker-worker",
+  "private": true,
+  "version": "0.0.1",
+  "description": "Cloudflare Worker AI boundary for Hadith Checker v4 — translation and search-query endpoints only, backed by the Google Gemini API (gemini-3.5-flash-lite). No secrets in source; GEMINI_API_KEY is a Worker secret set via `wrangler secret put`.",
+  "scripts": {
+    "dev": "wrangler dev",
+    "deploy": "wrangler deploy"
+  },
+  "devDependencies": {
+    "wrangler": "^3.78.0"
+  }
+}

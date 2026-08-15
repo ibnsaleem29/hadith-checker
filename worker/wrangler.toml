@@ -1,0 +1,11 @@
+name = "hadith-checker-worker"
+main = "src/index.js"
+compatibility_date = "2024-09-23"
+
+# GEMINI_API_KEY is a Worker SECRET, not a var — it must never appear in this
+# file (secrets aren't declared here at all). Set it with:
+#   npx wrangler secret put GEMINI_API_KEY
+# (interactive prompt, value never touches disk or Git). See worker/README.md.
+#
+# No [ai] binding here anymore — Cloudflare Workers AI is no longer used by
+# this Worker; it calls the Google Gemini API directly over fetch() instead.

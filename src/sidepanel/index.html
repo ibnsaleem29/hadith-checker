@@ -1,0 +1,31 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Hadith Checker [English & Arabic]</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <h1>Search Dorar for a Hadith</h1>
+    <p class="subtitle">Results open in a full browser tab — there's more room there for the complete result set.</p>
+  </header>
+
+  <main>
+    <form id="search-form" class="search-pill">
+      <input
+        id="query-input"
+        type="text"
+        dir="auto"
+        placeholder="Paste Arabic, English, or part of a hadith"
+        autocomplete="off"
+      />
+      <button id="search-button" type="submit" aria-label="Search">Search</button>
+    </form>
+
+    <p id="status" role="status"></p>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

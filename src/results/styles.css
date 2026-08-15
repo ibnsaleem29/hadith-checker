@@ -1,0 +1,735 @@
+/* Hadith Checker — full results page.
+   VISUAL PASS (this correction): reworked to be structurally close to the
+   Ahmed ElTabarani reference screenshots — inline grading/takhrij (not boxed
+   panels), gold/tan accents, a full-width solid-color action-button row, and
+   a modal popup for شرح. Own color tokens and markup throughout — no CSS or
+   HTML copied from the reference; only its layout/structure/density were
+   studied (see app.js's file-level comment for the explicit list of what was
+   and wasn't carried over, and why).
+
+   BILINGUAL PARALLEL REDESIGN (this pass): the results page now opens in its
+   own full browser tab, not a narrow extension popup, so the card layout
+   changed from a single stacked column (Arabic, English note underneath) to
+   a genuine two-column grid: English on the LEFT, Arabic on the RIGHT,
+   row-aligned so the two languages visually correspond field-by-field.
+   `.hadith-card` is itself the grid container — every field-row function in
+   app.js appends its English/Arabic cells directly as grid children so
+   everything stays column-aligned across the whole card, not just within
+   one sub-section. Takhrij is the deliberate exception (can run much
+   longer than the other fields): a full-width block, Arabic row on top,
+   English row underneath, rather than two cramped narrow columns. Below a
+   width where two columns stop being comfortable, the grid collapses to a
+   single column and every field naturally stacks Arabic-then-English in DOM
+   order (see the responsive block at the end of this file). This is a
+   presentation-only change — none of it touches how/when translations are
+   requested, cached, or retried (see app.js). */
+
+:root {
+  color-scheme: light;
+
+  --primary: #146356;
+  --primary-dark: #0d4a41;
+  --primary-light: #e5f1ee;
+
+  --accent: #b3892f;
+  --accent-light: #f8f0dd;
+  --accent-dark: #8f6c22;
+
+  --bg: #f6f4ee;
+  --card-bg: #ffffff;
+  --border: #e6e2d6;
+  --border-strong: #d5cfc0;
+
+  --text: #23281f;
+  --text-secondary: #4b5047;
+  --muted: #7d8277;
+
+  --error: #a5291f;
+
+  --radius-sm: 8px;
+  --radius-md: 12px;
+  --radius-lg: 18px;
+  --radius-pill: 999px;
+
+  --shadow-card: 0 1px 2px rgba(20, 24, 20, 0.05), 0 8px 20px rgba(20, 24, 20, 0.06);
+  --shadow-card-hover: 0 2px 4px rgba(20, 24, 20, 0.06), 0 12px 28px rgba(20, 99, 86, 0.12);
+  --shadow-modal: 0 20px 60px rgba(0, 0, 0, 0.35);
+
+  --ease: cubic-bezier(0.33, 1, 0.68, 1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+/* -------------------------------------------------------------------------
+   Header — stacked title + centered search pill (closer to the reference)
+   ------------------------------------------------------------------------- */
+
+header {
+  background: var(--primary);
+  border-bottom: 3px solid var(--accent);
+  padding: 20px 24px 26px;
+}
+
+.header-inner {
+  max-width: 700px;
+  margin: 0 auto;
+  display: flex;
+  flex-direction: column;
+  align-items: center;
+  gap: 14px;
+}
+
+header h1 {
+  margin: 0;
+  font-size: 20px;
+  font-weight: 700;
+  color: #ffffff;
+  letter-spacing: 0.01em;
+}
+
+.search-pill {
+  width: 100%;
+  display: flex;
+  align-items: stretch;
+  background: var(--card-bg);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  box-shadow: var(--shadow-card);
+  transition: box-shadow 0.25s var(--ease);
+}
+
+.search-pill:focus-within {
+  box-shadow: 0 0 0 3px rgba(255, 255, 255, 0.35), var(--shadow-card);
+}
+
+#query-input {
+  flex: 1;
+  border: none;
+  outline: none;
+  padding: 12px 18px;
+  font-size: 14px;
+  background: transparent;
+  color: var(--text);
+}
+
+#query-input::placeholder {
+  color: var(--muted);
+}
+
+#search-button {
+  border: none;
+  padding: 0 20px;
+  background: var(--accent);
+  color: #fff;
+  font-size: 15px;
+  cursor: pointer;
+  transition: background 0.2s var(--ease);
+}
+
+#search-button:hover:not(:disabled) {
+  background: var(--accent-dark);
+}
+
+#search-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+/* -------------------------------------------------------------------------
+   Main
+   ------------------------------------------------------------------------- */
+
+main {
+  max-width: 1100px;
+  margin: 0 auto;
+  padding: 26px 32px 60px;
+}
+
+#status {
+  min-height: 18px;
+  margin: 0 0 6px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+#status.error {
+  color: var(--error);
+}
+
+/* Subtle, non-error fallback note — never styled as a warning/error, appears
+   exactly once, directly under the header/search bar, before any result. */
+.disclaimer {
+  margin: 0 0 16px;
+  padding: 8px 14px;
+  font-size: 13.5px;
+  line-height: 1.5;
+  color: var(--text-secondary);
+  background: var(--primary-light);
+  border: 1px solid var(--border);
+  border-radius: var(--radius-sm);
+}
+
+#results-summary {
+  margin: 0 0 18px;
+  display: flex;
+  align-items: center;
+  flex-wrap: wrap;
+  gap: 10px;
+}
+
+.summary-count {
+  font-size: 13px;
+  font-weight: 600;
+  color: var(--text-secondary);
+}
+
+#result-list {
+  display: flex;
+  flex-direction: column;
+  gap: 22px;
+}
+
+/* -------------------------------------------------------------------------
+   Hadith card
+   ------------------------------------------------------------------------- */
+
+.hadith-card {
+  background: var(--card-bg);
+  border: 1px solid var(--border);
+  border-inline-end: 4px solid var(--accent); /* thin gold accent edge, matching the reference */
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-card);
+  padding: 28px 34px;
+  transition: box-shadow 0.3s var(--ease), transform 0.3s var(--ease);
+
+  /* Bilingual grid: English left / Arabic right, row-aligned. Every direct
+     child is explicitly placed via grid-column below — result-serial,
+     takhrij-block, and action-bar span both columns; every bi-cell-en/
+     bi-cell-ar pair occupies one row each. */
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 36px;
+  row-gap: 14px;
+  align-items: start;
+}
+
+.hadith-card:hover {
+  box-shadow: var(--shadow-card-hover);
+  transform: translateY(-1px);
+}
+
+.hadith-card > .result-serial,
+.hadith-card > .takhrij-block,
+.hadith-card > .field-row-full,
+.hadith-card > .action-bar {
+  grid-column: 1 / -1;
+}
+
+.bi-cell-en {
+  grid-column: 1;
+}
+
+.bi-cell-ar {
+  grid-column: 2;
+  border-inline-start: 1px solid var(--border);
+  padding-inline-start: 30px;
+}
+
+.card-divider {
+  border: none;
+  height: 1px;
+  background: var(--border);
+  margin: 0;
+}
+
+.result-serial {
+  align-self: flex-start;
+  font-size: 11px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  text-transform: uppercase;
+  color: var(--primary);
+  background: var(--primary-light);
+  border-radius: var(--radius-sm);
+  padding: 3px 10px;
+}
+
+/* --- The hadith itself: the card's visual centerpiece. Arabic (right,
+   authoritative) and its English translation (left) both get full prose
+   treatment — generous size and line-height, not compact "note" styling. --- */
+
+.hadith-cell {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.arabic-block {
+  font-family: 'Traditional Arabic', 'Segoe UI', Tahoma, sans-serif;
+  font-size: 22px;
+  font-weight: 500;
+  line-height: 2.1;
+  color: var(--text);
+  user-select: text;
+  /* Render as one continuous flowing RTL paragraph: collapse any incidental
+     whitespace/newlines that happen to be embedded in Dorar's own raw text
+     (confirmed live — some results contain a literal newline between the
+     main isnad and an alternate "وَرَواه..." chain) into ordinary collapsible
+     space, so wrapping is driven purely by the browser at the available
+     column width — never one clause/sentence forced onto its own line. This
+     is whitespace normalization only; no Arabic word or diacritic changes. */
+  white-space: normal;
+  overflow-wrap: normal;
+  word-break: normal;
+}
+
+.bi-cell-tag {
+  align-self: flex-start;
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.05em;
+  color: var(--primary);
+  background: var(--primary-light);
+  border-radius: var(--radius-sm);
+  padding: 2px 8px;
+  cursor: help;
+}
+
+.hadith-en-text {
+  font-size: 20px;
+  font-weight: 500;
+  line-height: 1.75;
+  color: var(--text);
+  white-space: normal;
+}
+
+.hadith-en-text.is-loading,
+.hadith-en-text.is-unavailable {
+  font-size: 15px;
+  font-weight: 400;
+}
+
+/* --- Inline translation (used under hadith / grading / takhrij / sharh) --- */
+
+.inline-translation {
+  display: flex;
+  align-items: baseline;
+  gap: 8px;
+  padding-inline-start: 2px;
+}
+
+.inline-translation-tag {
+  flex-shrink: 0;
+  font-size: 10px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  color: var(--primary);
+  background: var(--primary-light);
+  border-radius: var(--radius-sm);
+  padding: 1px 6px;
+  cursor: help;
+}
+
+.translation-text {
+  font-size: 15px;
+  line-height: 1.65;
+  color: var(--text-secondary);
+}
+
+.translation-text.is-loading,
+.translation-text.is-unavailable {
+  color: var(--muted);
+  font-style: italic;
+  display: inline-flex;
+  align-items: center;
+  gap: 7px;
+}
+
+.translation-text.is-loading::before {
+  content: '';
+  width: 11px;
+  height: 11px;
+  flex-shrink: 0;
+  border-radius: 50%;
+  border: 2px solid var(--border-strong);
+  border-top-color: var(--primary);
+  border-right-color: var(--accent);
+  animation: spin 0.7s linear infinite;
+}
+
+@keyframes spin {
+  to {
+    transform: rotate(360deg);
+  }
+}
+
+/* --- Metadata rows: one English cell + one Arabic cell per field, row-
+   aligned via the card's own grid (see .bi-cell-en/.bi-cell-ar above). --- */
+
+.field-cell {
+  font-size: 14.5px;
+  line-height: 1.8;
+}
+
+.field-row-full {
+  font-size: 14.5px;
+  line-height: 1.8;
+  padding-top: 2px;
+}
+
+.field-row-label {
+  font-weight: 700;
+  color: var(--text);
+  /* Pinned explicitly so labels stay proportional while the value text next
+     to them gets the +1px content-readability bump below. */
+  font-size: 14.5px;
+}
+
+.field-row-value {
+  color: var(--text-secondary);
+  font-size: 15.5px;
+}
+
+.field-cell .field-row-value {
+  font-family: 'Traditional Arabic', 'Segoe UI', Tahoma, sans-serif;
+}
+
+.name-english {
+  font-weight: 600;
+  color: var(--text);
+}
+
+.name-english.is-loading,
+.name-english.is-unavailable {
+  font-weight: 400;
+  font-style: italic;
+  color: var(--muted);
+}
+
+/* Grading's English cell: bold + slightly larger, "visually distinctive" —
+   but deliberately NO verdict-based color (no sahih=green), unlike the
+   reference — see the file-level note in app.js for why. */
+.field-cell .translation-text:not(.is-loading):not(.is-unavailable) {
+  font-weight: 600;
+}
+
+/* -------------------------------------------------------------------------
+   Takhrij — deliberate exception to the side-by-side layout (see the
+   file-level note): full width, Arabic row on top, English row underneath,
+   rather than two narrow columns for what can be a long paragraph.
+   ------------------------------------------------------------------------- */
+
+.takhrij-block {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding-top: 10px;
+  margin-top: 2px;
+  border-top: 1px solid var(--border);
+}
+
+.takhrij-row {
+  font-size: 14.5px;
+  line-height: 1.8;
+}
+
+.takhrij-row-en .translation-text {
+  font-size: 15px;
+}
+
+/* -------------------------------------------------------------------------
+   Action bar — full-width row of solid buttons, distinct color per action
+   ------------------------------------------------------------------------- */
+
+.action-bar {
+  display: flex;
+  flex-wrap: wrap;
+  gap: 8px;
+  padding-top: 4px;
+}
+
+.action-btn {
+  flex: 1 1 140px;
+  display: inline-flex;
+  align-items: center;
+  justify-content: center;
+  border: none;
+  border-radius: var(--radius-sm);
+  padding: 10px 14px;
+  font-size: 13.5px;
+  font-weight: 700;
+  color: #fff;
+  text-decoration: none;
+  text-align: center;
+  cursor: pointer;
+  transition: filter 0.2s var(--ease), transform 0.15s var(--ease);
+}
+
+.action-btn:hover {
+  filter: brightness(1.08);
+  transform: translateY(-1px);
+}
+
+.action-btn:active {
+  transform: translateY(0);
+}
+
+.action-btn-sharh {
+  background: #219653;
+}
+
+.action-btn-similar {
+  background: #2a5c8a;
+}
+
+.action-btn-usul {
+  background: var(--primary);
+}
+
+.action-btn-alt {
+  background: var(--accent);
+}
+
+.action-btn-asbab {
+  background: #a8562f;
+}
+
+/* -------------------------------------------------------------------------
+   شرح modal — dark backdrop, centered card, X close button
+   ------------------------------------------------------------------------- */
+
+.modal-overlay {
+  position: fixed;
+  inset: 0;
+  background: rgba(20, 24, 20, 0.55);
+  display: flex;
+  align-items: flex-start;
+  justify-content: center;
+  padding: 60px 20px;
+  overflow-y: auto;
+  z-index: 1000;
+}
+
+.modal-panel {
+  width: 100%;
+  max-width: 780px;
+  background: var(--card-bg);
+  border-radius: var(--radius-lg);
+  box-shadow: var(--shadow-modal);
+  padding: 28px 34px;
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.modal-close {
+  position: fixed;
+  top: 18px;
+  inset-inline-end: 24px;
+  width: 38px;
+  height: 38px;
+  border-radius: var(--radius-pill);
+  border: none;
+  background: rgba(255, 255, 255, 0.95);
+  color: var(--text);
+  font-size: 20px;
+  line-height: 1;
+  cursor: pointer;
+  box-shadow: var(--shadow-card);
+  z-index: 1001;
+}
+
+.modal-close:hover {
+  background: var(--error);
+  color: #fff;
+}
+
+.modal-recap {
+  display: flex;
+  flex-direction: column;
+  gap: 10px;
+}
+
+.modal-recap-arabic {
+  font-size: 18px;
+  white-space: normal;
+}
+
+/* If the hadith was already translated (session cache) by the time شرح/أصول
+   is opened, the recap shows both languages side by side, matching the main
+   list's bilingual philosophy — read from the cache only, never triggers a
+   new translation (see app.js's renderModalRecap). */
+.modal-recap-bilingual {
+  display: grid;
+  grid-template-columns: 1fr 1fr;
+  column-gap: 24px;
+  row-gap: 10px;
+  align-items: start;
+}
+
+.modal-recap-bilingual .bi-cell-ar {
+  border-inline-start: 1px solid var(--border);
+  padding-inline-start: 20px;
+}
+
+.modal-recap-english {
+  font-size: 16px;
+  line-height: 1.7;
+}
+
+.modal-recap-grading-bilingual {
+  grid-column: 1 / -1;
+  display: flex;
+  flex-wrap: wrap;
+  justify-content: space-between;
+  gap: 12px 24px;
+  font-size: 13.5px;
+  color: var(--text-secondary);
+  padding-top: 4px;
+  border-top: 1px solid var(--border);
+}
+
+.modal-section-heading {
+  font-size: 13px;
+  font-weight: 700;
+  color: var(--primary);
+  text-transform: uppercase;
+  letter-spacing: 0.05em;
+}
+
+.sharh-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 16px;
+}
+
+.sharh-modal-body.is-unavailable {
+  color: var(--muted);
+  font-style: italic;
+}
+
+/* One progressive-translation chunk of شرح content (see app.js's
+   chunkLongArabicText) — its own Arabic block + inline translation, spaced
+   from the next chunk by the parent's gap above. */
+.sharh-chunk {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+}
+
+.usul-modal-body {
+  display: flex;
+  flex-direction: column;
+  gap: 18px;
+}
+
+.usul-modal-body.is-unavailable {
+  color: var(--muted);
+  font-style: italic;
+}
+
+.usul-source-entry {
+  display: flex;
+  flex-direction: column;
+  gap: 8px;
+  padding: 14px 16px;
+  border-radius: var(--radius-md);
+  background: var(--primary-light);
+}
+
+.usul-source-heading {
+  font-size: 12px;
+  font-weight: 700;
+  letter-spacing: 0.04em;
+  text-transform: uppercase;
+  color: var(--primary);
+}
+
+.secondary-prose-arabic {
+  font-family: 'Traditional Arabic', 'Segoe UI', Tahoma, sans-serif;
+  font-size: 17px;
+  line-height: 1.9;
+  color: var(--text);
+  background: var(--accent-light);
+  border-radius: var(--radius-sm);
+  padding: 14px 16px;
+  white-space: normal;
+}
+
+/* -------------------------------------------------------------------------
+   Responsive — below this width, two side-by-side columns stop being
+   comfortable (per spec: never shrink the text to force two columns, fall
+   back to a single stacked column instead). Every bi-cell-en/bi-cell-ar pair
+   collapses to grid-column: 1, so cards stack in DOM order — Arabic first,
+   English beneath, matching this project's established convention.
+   ------------------------------------------------------------------------- */
+
+@media (max-width: 880px) {
+  .hadith-card {
+    grid-template-columns: 1fr;
+    row-gap: 18px;
+  }
+
+  .bi-cell-en,
+  .bi-cell-ar {
+    grid-column: 1;
+    /* Desktop pairs share one explicit inline grid-row (see app.js's
+       placePairInRow) so EN/AR line up regardless of content-height
+       differences. That would collapse both cells of a pair on top of each
+       other in a single-column grid — override back to auto so DOM order
+       (Arabic, then English) drives natural stacking instead. */
+    grid-row: auto !important;
+  }
+
+  .bi-cell-ar {
+    border-inline-start: none;
+    padding-inline-start: 0;
+  }
+
+  .modal-recap-bilingual {
+    grid-template-columns: 1fr;
+  }
+
+  .modal-recap-bilingual .bi-cell-ar {
+    border-inline-start: none;
+    padding-inline-start: 0;
+  }
+}
+
+@media (max-width: 640px) {
+  main {
+    padding: 16px 14px 40px;
+  }
+
+  .hadith-card {
+    padding: 18px 20px;
+    row-gap: 14px;
+    column-gap: 0;
+  }
+
+  .arabic-block {
+    font-size: 19px;
+  }
+
+  .hadith-en-text {
+    font-size: 16px;
+  }
+
+  .action-btn {
+    flex: 1 1 45%;
+  }
+
+  .modal-panel {
+    padding: 20px;
+  }
+}

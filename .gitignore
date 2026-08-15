@@ -1,0 +1,9 @@
+# Build artifacts — the packaged ZIP is attached to GitHub Releases, not committed.
+dist/
+
+# OS/editor cruft
+.DS_Store
+Thumbs.db
+
+# Just in case anything gets installed at the root
+node_modules/

@@ -1,0 +1,122 @@
+/* Side panel — minimal search launcher only (see app.js for why). Card/result
+   styling now lives entirely in src/results/styles.css, since the side panel
+   no longer renders any results itself. */
+
+:root {
+  color-scheme: light;
+
+  --primary: #146356;
+  --primary-dark: #0d4a41;
+  --primary-light: #e5f1ee;
+
+  --bg: #f6f4ee;
+  --card-bg: #ffffff;
+  --border: #e6e2d6;
+
+  --text: #23281f;
+  --muted: #7d8277;
+  --error: #a5291f;
+
+  --radius-md: 12px;
+  --radius-pill: 999px;
+
+  --shadow-card: 0 1px 2px rgba(20, 24, 20, 0.05), 0 8px 20px rgba(20, 24, 20, 0.06);
+  --ease: cubic-bezier(0.33, 1, 0.68, 1);
+}
+
+* {
+  box-sizing: border-box;
+}
+
+body {
+  margin: 0;
+  font-family: 'Segoe UI', Tahoma, Arial, sans-serif;
+  background: var(--bg);
+  color: var(--text);
+}
+
+header {
+  padding: 20px 18px;
+  background: var(--primary);
+  border-bottom: 3px solid #b3892f;
+}
+
+header h1 {
+  margin: 0 0 6px;
+  font-size: 16px;
+  font-weight: 700;
+  color: #ffffff;
+}
+
+header .subtitle {
+  margin: 0;
+  font-size: 12px;
+  color: rgba(255, 255, 255, 0.85);
+  line-height: 1.5;
+}
+
+main {
+  padding: 18px 16px;
+}
+
+.search-pill {
+  display: flex;
+  align-items: stretch;
+  background: var(--card-bg);
+  border: 2px solid var(--border);
+  border-radius: var(--radius-pill);
+  overflow: hidden;
+  box-shadow: var(--shadow-card);
+  transition: border-color 0.25s var(--ease), box-shadow 0.25s var(--ease);
+  margin-bottom: 12px;
+}
+
+.search-pill:focus-within {
+  border-color: var(--primary);
+  box-shadow: 0 0 0 3px var(--primary-light), var(--shadow-card);
+}
+
+#query-input {
+  flex: 1;
+  border: none;
+  outline: none;
+  padding: 12px 16px;
+  font-size: 14px;
+  background: transparent;
+  color: var(--text);
+}
+
+#query-input::placeholder {
+  color: var(--muted);
+}
+
+#search-button {
+  border: none;
+  padding: 0 22px;
+  background: var(--primary);
+  color: #fff;
+  font-size: 14px;
+  font-weight: 600;
+  cursor: pointer;
+  transition: background 0.2s var(--ease);
+}
+
+#search-button:hover:not(:disabled) {
+  background: var(--primary-dark);
+}
+
+#search-button:disabled {
+  opacity: 0.6;
+  cursor: default;
+}
+
+#status {
+  min-height: 18px;
+  margin: 0 4px;
+  font-size: 13px;
+  color: var(--muted);
+}
+
+#status.error {
+  color: var(--error);
+}

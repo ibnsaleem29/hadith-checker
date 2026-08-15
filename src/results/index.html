@@ -1,0 +1,36 @@
+<!doctype html>
+<html lang="en">
+<head>
+  <meta charset="utf-8" />
+  <title>Hadith Checker — Results</title>
+  <link rel="stylesheet" href="styles.css" />
+</head>
+<body>
+  <header>
+    <div class="header-inner">
+      <h1>Hadith Checker</h1>
+      <form id="search-form" class="search-pill">
+        <button id="search-button" type="submit" aria-label="Search">
+          <span aria-hidden="true">&#128269;</span>
+        </button>
+        <input
+          id="query-input"
+          type="text"
+          dir="auto"
+          placeholder="Paste Arabic, English, or part of a hadith"
+          autocomplete="off"
+        />
+      </form>
+    </div>
+  </header>
+
+  <main>
+    <p id="status" role="status"></p>
+    <p id="disclaimer" class="disclaimer">⚠️ Please close any other open Hadith-checker tabs and refresh this page if you encounter broken English translations.</p>
+    <p id="results-summary"></p>
+    <div id="result-list"></div>
+  </main>
+
+  <script type="module" src="app.js"></script>
+</body>
+</html>

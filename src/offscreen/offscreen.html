@@ -1,0 +1,13 @@
+<!doctype html>
+<html>
+<head>
+  <meta charset="utf-8" />
+  <title>Hadith Checker — offscreen parser</title>
+</head>
+<body>
+  <!-- No visible UI. This page exists only to give the extension a real DOM
+       (DOMParser) so it can parse Dorar's HTML, which the background service
+       worker cannot do on its own. -->
+  <script type="module" src="offscreen.js"></script>
+</body>
+</html>
