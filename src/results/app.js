@@ -491,7 +491,7 @@ function appendPageNumberRow(card, value, rowCounter) {
   arCell.dir = 'rtl';
   const arLabel = document.createElement('span');
   arLabel.className = 'field-row-label';
-  arLabel.textContent = `${DORAR_FIELD_LABELS.numberOrPage}: `;
+  arLabel.textContent = DORAR_FIELD_LABELS.numberOrPage;
   const arValue = document.createElement('span');
   arValue.className = 'field-row-value';
   arValue.dir = 'auto';
@@ -503,7 +503,7 @@ function appendPageNumberRow(card, value, rowCounter) {
   enCell.dir = 'ltr';
   const enLabel = document.createElement('span');
   enLabel.className = 'field-row-label';
-  enLabel.textContent = 'Page/Number: ';
+  enLabel.textContent = 'Page/Number';
   const enValue = document.createElement('span');
   enValue.className = 'field-row-value';
   enValue.dir = 'auto';
@@ -526,7 +526,7 @@ function appendBilingualFieldRow(card, field, arabicValue, slots, mode, rowCount
   arCell.dir = 'rtl';
   const arLabel = document.createElement('span');
   arLabel.className = 'field-row-label';
-  arLabel.textContent = `${field.arLabel}: `;
+  arLabel.textContent = field.arLabel;
   const arValue = document.createElement('span');
   arValue.className = 'field-row-value';
   arValue.lang = 'ar';
@@ -538,7 +538,7 @@ function appendBilingualFieldRow(card, field, arabicValue, slots, mode, rowCount
   enCell.dir = 'ltr';
   const enLabel = document.createElement('span');
   enLabel.className = 'field-row-label';
-  enLabel.textContent = `${field.label}: `;
+  enLabel.textContent = field.label;
   enLabel.title = 'AI-generated translation — not Dorar’s own English wording.';
   const enValue = document.createElement('span');
   enValue.className = mode === 'name' ? 'translation-text name-english is-loading' : 'translation-text is-loading';
@@ -568,7 +568,7 @@ function appendTakhrijRow(card, arabicValue, slots, rowCounter) {
   arRow.dir = 'rtl';
   const arLabel = document.createElement('span');
   arLabel.className = 'field-row-label';
-  arLabel.textContent = `${DORAR_FIELD_LABELS.takhrij}: `;
+  arLabel.textContent = DORAR_FIELD_LABELS.takhrij;
   const arValue = document.createElement('span');
   arValue.className = 'field-row-value';
   arValue.lang = 'ar';
@@ -580,7 +580,7 @@ function appendTakhrijRow(card, arabicValue, slots, rowCounter) {
   enRow.dir = 'ltr';
   const enLabel = document.createElement('span');
   enLabel.className = 'field-row-label';
-  enLabel.textContent = 'Takhrij: ';
+  enLabel.textContent = 'Takhrij';
   enLabel.title = 'AI-generated translation — not Dorar’s own English wording.';
   const enValue = document.createElement('span');
   enValue.className = 'translation-text is-loading';

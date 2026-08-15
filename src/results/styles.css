@@ -46,6 +46,13 @@
 
   --error: #a5291f;
 
+  /* Metadata label badges only (Narrator/Muhaddith/Source/Page-Number/
+     Grading/Takhrij) — deliberately distinct from --primary/--accent (used
+     by the header/cards/action-tabs) and from each action-tab's own color,
+     so labels read as a separate visual layer without competing with them. */
+  --label-badge: #6b4c93;
+  --label-badge-text: #ffffff;
+
   --radius-sm: 8px;
   --radius-md: 12px;
   --radius-lg: 18px;
@@ -170,7 +177,7 @@ main {
 .disclaimer {
   margin: 0 0 16px;
   padding: 8px 14px;
-  font-size: 13.5px;
+  font-size: 14.5px;
   line-height: 1.5;
   color: var(--text-secondary);
   background: var(--primary-light);
@@ -252,7 +259,10 @@ main {
 
 .result-serial {
   align-self: flex-start;
-  font-size: 17px;
+  /* Kept a step above the metadata/value text sizes below (now 17px/17.5px
+     after this pass's +1px metadata increase) so RESULT #N still reads as
+     clearly the more prominent heading, not merely equal to body text. */
+  font-size: 19px;
   font-weight: 700;
   letter-spacing: 0.03em;
   text-transform: uppercase;
@@ -274,7 +284,7 @@ main {
 
 .arabic-block {
   font-family: 'Traditional Arabic', 'Segoe UI', Tahoma, sans-serif;
-  font-size: 23px;
+  font-size: 24px;
   font-weight: 500;
   line-height: 2.1;
   color: var(--text);
@@ -306,7 +316,7 @@ main {
    larger size). Pairing both classes in the selector raises specificity
    enough to reliably win, independent of source order. */
 .translation-text.hadith-en-text {
-  font-size: 21px;
+  font-size: 19px;
 }
 
 .hadith-en-text.is-loading,
@@ -337,7 +347,7 @@ main {
 }
 
 .translation-text {
-  font-size: 16px;
+  font-size: 17px;
   line-height: 1.65;
   color: var(--text-secondary);
 }
@@ -386,18 +396,51 @@ main {
 .field-row-label {
   font-weight: 700;
   color: var(--text);
-  /* Pinned explicitly so labels stay proportional while the value text next
-     to them gets the +1px content-readability bump below. */
   font-size: 14.5px;
 }
 
 .field-row-value {
   color: var(--text-secondary);
-  font-size: 16.5px;
+  font-size: 17.5px;
 }
 
 .field-cell .field-row-value {
   font-family: 'Traditional Arabic', 'Segoe UI', Tahoma, sans-serif;
+}
+
+/* --- Main-card metadata labels: small purple badges (Narrator/Muhaddith/
+   Source/Page-Number/Grading/Takhrij only). Scoped to .hadith-card so the
+   أصول الحديث modal's own field rows — which reuse .field-row-label/
+   .field-row-value for a different, unrelated set of labels (Source/Chain/
+   Wording) — are completely unaffected; the base rules above still apply
+   there exactly as before. Font-size matches .field-row-value/.translation-
+   text's 17px exactly, per requirement: label and value read as the same
+   typography level, not two different sizes. */
+.hadith-card .field-row-label {
+  display: inline-block;
+  font-size: 17px;
+  font-weight: 600;
+  color: var(--label-badge-text);
+  background: var(--label-badge);
+  border-radius: var(--radius-sm);
+  padding: 3px 7px;
+  margin-inline-end: 8px;
+  line-height: 1.3;
+  white-space: nowrap;
+}
+
+.hadith-card .field-row-value {
+  font-size: 17px;
+}
+
+/* Takhrij's label sits on its own line above the (often long) paragraph,
+   rather than inline before it like the other, short-value rows — matches
+   the approved mockup and keeps a long Takhrij paragraph from starting
+   mid-line after the badge. */
+.hadith-card .takhrij-row .field-row-label {
+  display: block;
+  margin-inline-end: 0;
+  margin-bottom: 6px;
 }
 
 .name-english {
@@ -440,7 +483,7 @@ main {
 }
 
 .takhrij-row-en .translation-text {
-  font-size: 16px;
+  font-size: 17px;
 }
 
 /* -------------------------------------------------------------------------
@@ -462,7 +505,7 @@ main {
   border: none;
   border-radius: var(--radius-sm);
   padding: 10px 14px;
-  font-size: 13.5px;
+  font-size: 14.5px;
   font-weight: 700;
   color: #fff;
   text-decoration: none;
