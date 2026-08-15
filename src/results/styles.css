@@ -229,7 +229,6 @@ main {
 
 .hadith-card > .result-serial,
 .hadith-card > .takhrij-block,
-.hadith-card > .field-row-full,
 .hadith-card > .action-bar {
   grid-column: 1 / -1;
 }
@@ -253,14 +252,14 @@ main {
 
 .result-serial {
   align-self: flex-start;
-  font-size: 11px;
+  font-size: 17px;
   font-weight: 700;
-  letter-spacing: 0.05em;
+  letter-spacing: 0.03em;
   text-transform: uppercase;
   color: var(--primary);
   background: var(--primary-light);
   border-radius: var(--radius-sm);
-  padding: 3px 10px;
+  padding: 5px 14px;
 }
 
 /* --- The hadith itself: the card's visual centerpiece. Arabic (right,
@@ -275,7 +274,7 @@ main {
 
 .arabic-block {
   font-family: 'Traditional Arabic', 'Segoe UI', Tahoma, sans-serif;
-  font-size: 22px;
+  font-size: 23px;
   font-weight: 500;
   line-height: 2.1;
   color: var(--text);
@@ -292,25 +291,22 @@ main {
   word-break: normal;
 }
 
-.bi-cell-tag {
-  align-self: flex-start;
-  flex-shrink: 0;
-  font-size: 10px;
-  font-weight: 700;
-  letter-spacing: 0.05em;
-  color: var(--primary);
-  background: var(--primary-light);
-  border-radius: var(--radius-sm);
-  padding: 2px 8px;
-  cursor: help;
-}
-
 .hadith-en-text {
-  font-size: 20px;
   font-weight: 500;
   line-height: 1.75;
   color: var(--text);
   white-space: normal;
+}
+
+/* Specificity fix: .hadith-en-text and .translation-text (below) are both
+   single-class selectors with equal specificity, and .translation-text
+   comes later in source order — so its font-size was silently winning the
+   cascade here regardless of what this rule said, ever since the bilingual
+   redesign (confirmed live: computed font-size was 16px, not the intended
+   larger size). Pairing both classes in the selector raises specificity
+   enough to reliably win, independent of source order. */
+.translation-text.hadith-en-text {
+  font-size: 21px;
 }
 
 .hadith-en-text.is-loading,
@@ -341,7 +337,7 @@ main {
 }
 
 .translation-text {
-  font-size: 15px;
+  font-size: 16px;
   line-height: 1.65;
   color: var(--text-secondary);
 }
@@ -377,12 +373,12 @@ main {
    aligned via the card's own grid (see .bi-cell-en/.bi-cell-ar above). --- */
 
 .field-cell {
-  font-size: 14.5px;
+  font-size: 15.5px;
   line-height: 1.8;
 }
 
 .field-row-full {
-  font-size: 14.5px;
+  font-size: 15.5px;
   line-height: 1.8;
   padding-top: 2px;
 }
@@ -397,7 +393,7 @@ main {
 
 .field-row-value {
   color: var(--text-secondary);
-  font-size: 15.5px;
+  font-size: 16.5px;
 }
 
 .field-cell .field-row-value {
@@ -439,12 +435,12 @@ main {
 }
 
 .takhrij-row {
-  font-size: 14.5px;
+  font-size: 15.5px;
   line-height: 1.8;
 }
 
 .takhrij-row-en .translation-text {
-  font-size: 15px;
+  font-size: 16px;
 }
 
 /* -------------------------------------------------------------------------
@@ -561,7 +557,7 @@ main {
 }
 
 .modal-recap-arabic {
-  font-size: 18px;
+  font-size: 19px;
   white-space: normal;
 }
 
@@ -583,7 +579,7 @@ main {
 }
 
 .modal-recap-english {
-  font-size: 16px;
+  font-size: 17px;
   line-height: 1.7;
 }
 
@@ -593,7 +589,7 @@ main {
   flex-wrap: wrap;
   justify-content: space-between;
   gap: 12px 24px;
-  font-size: 13.5px;
+  font-size: 14.5px;
   color: var(--text-secondary);
   padding-top: 4px;
   border-top: 1px solid var(--border);
@@ -657,7 +653,7 @@ main {
 
 .secondary-prose-arabic {
   font-family: 'Traditional Arabic', 'Segoe UI', Tahoma, sans-serif;
-  font-size: 17px;
+  font-size: 18px;
   line-height: 1.9;
   color: var(--text);
   background: var(--accent-light);
@@ -718,11 +714,11 @@ main {
   }
 
   .arabic-block {
-    font-size: 19px;
+    font-size: 20px;
   }
 
-  .hadith-en-text {
-    font-size: 16px;
+  .translation-text.hadith-en-text {
+    font-size: 17px;
   }
 
   .action-btn {

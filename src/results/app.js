@@ -373,14 +373,13 @@ function renderCard(result, index) {
   }
 
   if (result.pageOrNumber) {
-    // Language-neutral (a page/citation number) — no English translation to
-    // pair it with, so it stays a single full-width row.
-    card.appendChild(
-      placeInRow(
-        renderSimpleFullRow(DORAR_FIELD_LABELS.numberOrPage, 'Page/Number', result.pageOrNumber),
-        rowCounter,
-      ),
-    );
+    // Language-neutral (a page/citation number — same value both sides, no
+    // translation needed) but still a proper bilingual PAIR of cells, same
+    // as every other metadata row: English cell in the LEFT column, Arabic
+    // cell in the RIGHT column. (FIX: this used to be a single combined
+    // full-width row with both labels concatenated together, which could
+    // visually land the Arabic label on the English/left side.)
+    appendPageNumberRow(card, result.pageOrNumber, rowCounter);
   }
 
   const gradingField = PROSE_FIELDS.find((f) => f.key === 'grading');
@@ -445,23 +444,22 @@ function appendPrimarySection(card, result, slots, rowCounter) {
   const enCell = document.createElement('div');
   enCell.className = 'bi-cell bi-cell-en hadith-cell';
   enCell.dir = 'ltr';
-  const tag = document.createElement('span');
-  tag.className = 'bi-cell-tag';
-  tag.textContent = 'AI TRANSLATION';
-  tag.title = 'AI-generated translation — not Dorar’s own English wording.';
   const englishBlock = document.createElement('div');
   englishBlock.className = 'translation-text hadith-en-text is-loading';
   englishBlock.dir = 'ltr';
   englishBlock.lang = 'en';
+  englishBlock.title = 'AI-generated translation — not Dorar’s own English wording.';
   englishBlock.textContent = 'Translating…';
   slots.hadith = englishBlock;
-  enCell.append(tag, englishBlock);
+  enCell.append(englishBlock);
 
   placePairInRow(arCell, enCell, rowCounter);
   card.append(arCell, enCell);
 }
 
-/** One full-width, language-neutral row (currently just Page/Number). */
+/** One full-width, language-neutral row — used only by the modal recap's
+ * grading fallback (see renderModalRecap), which sits in a plain flex
+ * container, not the main card's bilingual grid. */
 function renderSimpleFullRow(arLabel, enLabel, value) {
   const row = document.createElement('div');
   row.className = 'field-row field-row-full';
@@ -477,6 +475,43 @@ function renderSimpleFullRow(arLabel, enLabel, value) {
 
   row.append(labelEl, valueEl);
   return row;
+}
+
+/**
+ * Page/Number: language-neutral (a citation number, e.g. "3/348") so the
+ * SAME value appears on both sides — but still rendered as a proper
+ * left=English/right=Arabic cell PAIR like every other metadata row, not a
+ * single combined row. That combined-row shape was the bug: with both
+ * labels concatenated into one LTR text run, the Arabic label could end up
+ * visually appearing on the English/left side instead of its own column.
+ */
+function appendPageNumberRow(card, value, rowCounter) {
+  const arCell = document.createElement('div');
+  arCell.className = 'bi-cell bi-cell-ar field-cell';
+  arCell.dir = 'rtl';
+  const arLabel = document.createElement('span');
+  arLabel.className = 'field-row-label';
+  arLabel.textContent = `${DORAR_FIELD_LABELS.numberOrPage}: `;
+  const arValue = document.createElement('span');
+  arValue.className = 'field-row-value';
+  arValue.dir = 'auto';
+  arValue.textContent = value;
+  arCell.append(arLabel, arValue);
+
+  const enCell = document.createElement('div');
+  enCell.className = 'bi-cell bi-cell-en field-cell';
+  enCell.dir = 'ltr';
+  const enLabel = document.createElement('span');
+  enLabel.className = 'field-row-label';
+  enLabel.textContent = 'Page/Number: ';
+  const enValue = document.createElement('span');
+  enValue.className = 'field-row-value';
+  enValue.dir = 'auto';
+  enValue.textContent = value;
+  enCell.append(enLabel, enValue);
+
+  placePairInRow(arCell, enCell, rowCounter);
+  card.append(arCell, enCell);
 }
 
 /**
