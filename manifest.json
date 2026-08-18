@@ -2,7 +2,7 @@
   "manifest_version": 3,
   "name": "Hadith Checker [English & Arabic]",
   "version": "1.0.0",
-  "description": "Search Hadith on Dorar.net in Arabic and English — translations, grading, sources, and commentary.",
+  "description": "Research & Explore Hadith in English & Arabic — translations, grading, sources, takhreej & sharh from scholarly supervised Dorar.net",
   "permissions": ["sidePanel", "offscreen", "contextMenus", "storage"],
   "host_permissions": [
     "https://dorar.net/*",
