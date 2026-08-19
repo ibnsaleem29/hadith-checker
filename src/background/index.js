@@ -67,8 +67,16 @@ const DORAR_MAX_PAGES = 10;
 // exempt from this budget: withRetry() re-enqueues each retry attempt as its
 // own gated dispatch (see below), so a burst of retries can never itself
 // become a retry storm that blows past the RPM ceiling.
+//
+// PERFORMANCE PATCH (this pass, CHANGE 1): concurrency raised from 3 to 5 to
+// match AUTO_TRANSLATE_COUNT (results/app.js) — previously, of the 5 results
+// that auto-translate on every search, results #4 and #5 were guaranteed to
+// sit in translationQueuePending waiting for one of the first 3 to finish,
+// purely because of this cap, even though the RPM limiter alone already
+// protects the real Gemini quota. The RPM limiter below is UNCHANGED — this
+// only lets more of the already-RPM-gated dispatches be in flight at once.
 // ---------------------------------------------------------------------------
-const TRANSLATION_QUEUE_CONCURRENCY = 3;
+const TRANSLATION_QUEUE_CONCURRENCY = 5;
 const TRANSLATION_RPM_LIMIT = 12; // safety margin under Gemini's real 15 RPM free-tier ceiling
 const TRANSLATION_MAX_RETRIES = 2;
 const TRANSLATION_RETRY_BASE_DELAY_MS = 1500;
@@ -78,10 +86,79 @@ const translationQueuePending = [];
 const translationDispatchTimestamps = []; // ms epoch times of dispatches within the trailing 60s window
 let rpmRecheckScheduled = false;
 
+// ---------------------------------------------------------------------------
+// STALE-QUEUE FIX (this pass): the queue above is intentionally GLOBAL/
+// SHARED across every tab (see the file-level MULTI-TAB CORRECTION note) —
+// that part is correct and unchanged. The bug this pass fixes is narrower:
+// a task enqueued by an OLD search (from a tab that has since started a NEW
+// search) had no way to be recognized as obsolete, so it could sit in
+// translationQueuePending consuming a real dispatch slot/RPM tick that the
+// NEW search's own tasks then had to wait behind — invisibly, since
+// DevTools Network only shows time AFTER a request is actually dispatched,
+// never time spent queued before that. Diagnosed and reproduced via a
+// standalone simulation of this exact algorithm in the prior diagnostic
+// pass (see that report).
+//
+// Fix: every task now carries the ID of the TAB that created it and a
+// per-tab, monotonically increasing GENERATION number (one per search
+// submitted from results/app.js — see that file's runSearch()). The
+// background tracks, per tab, the latest generation it has seen. A task
+// whose generation is older than the latest one seen for its tab is
+// STALE: it is never dispatched (never counted against concurrency or the
+// RPM budget), and its promise is resolved immediately with
+// STALE_TASK_RESULT rather than calling the real Worker fetch at all —
+// this is what satisfies "no Promise remains permanently unresolved" and
+// "do not create unnecessary retries for invalidated work" (a resolved,
+// non-throwing outcome never enters withRetry's catch/retry path).
+//
+// An already-DISPATCHED task (its real fetch is already in flight) is NOT
+// aborted here — no AbortController plumbing exists for that yet, and the
+// instruction explicitly allows it to "finish naturally" in that case.
+// Its result still flows back to the tab normally; results/app.js is the
+// one that gates whether a response — dispatched-then-completed OR
+// stale-skipped — is still allowed to touch the CURRENT search's DOM/cache
+// (see that file's generation check), since the background never touches
+// DOM. Together these two checks (background: don't dispatch stale queued
+// work; frontend: don't apply a stale response) fully cover both cases.
+//
+// The RPM limiter and concurrency cap themselves are completely
+// unchanged — this never bypasses or weakens either; it only prevents
+// OBSOLETE work from occupying a slot a live search's own tasks need.
+// ---------------------------------------------------------------------------
+const STALE_TASK_RESULT = Symbol('stale-translation-task');
+const latestGenerationByTab = new Map(); // tabId -> highest generation number seen so far
+
+/**
+ * Called once per incoming TRANSLATE_TEXT/TRANSLATE_BATCH message. If this
+ * message's generation is NEWER than any seen before for this tab, records
+ * that and immediately purges (settles + removes) any still-queued tasks
+ * from that same tab with an OLDER generation — proactive cleanup, on top
+ * of the defensive check pumpTranslationQueue also does at dispatch time.
+ */
+function registerGeneration(tabId, generation) {
+  if (tabId === undefined || generation === undefined) return;
+  const previous = latestGenerationByTab.get(tabId) ?? -1;
+  if (generation <= previous) return;
+  latestGenerationByTab.set(tabId, generation);
+
+  for (let i = translationQueuePending.length - 1; i >= 0; i -= 1) {
+    const task = translationQueuePending[i];
+    if (task.tabId === tabId && task.generation !== undefined && task.generation < generation) {
+      translationQueuePending.splice(i, 1)[0].resolve(STALE_TASK_RESULT);
+    }
+  }
+}
+
+function isTaskStale(task) {
+  if (task.tabId === undefined || task.generation === undefined) return false; // no generation info -> never treat as stale
+  const latest = latestGenerationByTab.get(task.tabId);
+  return latest !== undefined && task.generation < latest;
+}
+
 /** Enqueues ONE actual outbound call (one real HTTP attempt to the Worker). */
-function enqueueTranslationTask(taskFn) {
+function enqueueTranslationTask(taskFn, tabId, generation, requestId) {
   return new Promise((resolve, reject) => {
-    translationQueuePending.push({ taskFn, resolve, reject });
+    translationQueuePending.push({ taskFn, resolve, reject, tabId, generation, requestId });
     pumpTranslationQueue();
   });
 }
@@ -95,6 +172,17 @@ function pruneDispatchWindow() {
 
 function pumpTranslationQueue() {
   if (translationQueuePending.length === 0) return;
+
+  // Defensive stale-skip (belt-and-suspenders alongside registerGeneration's
+  // proactive purge above): never dispatch, never count against
+  // concurrency/RPM, just settle immediately and keep pumping.
+  if (isTaskStale(translationQueuePending[0])) {
+    const stale = translationQueuePending.shift();
+    stale.resolve(STALE_TASK_RESULT);
+    pumpTranslationQueue();
+    return;
+  }
+
   if (translationQueueActive >= TRANSLATION_QUEUE_CONCURRENCY) return; // re-pumped when a slot frees
 
   pruneDispatchWindow();
@@ -117,6 +205,7 @@ function pumpTranslationQueue() {
 
   translationDispatchTimestamps.push(Date.now());
   translationQueueActive += 1;
+  notifyDispatched(next.tabId, next.requestId); // Part 2: tell the tab this task has genuinely started (Queued… -> Translating…)
   next
     .taskFn()
     // Propagate the task's real outcome (value or error) to the original
@@ -132,22 +221,45 @@ function pumpTranslationQueue() {
 }
 
 /**
+ * Part 2 (UI Queued… vs Translating…): a one-way, fire-and-forget
+ * notification to the tab that owns this task, sent at the exact moment
+ * its real Worker fetch begins. Deliberately best-effort — if the tab has
+ * navigated away or has no listener, chrome.tabs.sendMessage rejects; that
+ * is swallowed here since it is purely a UI-affordance signal, never
+ * required for correctness (the tab still gets the real, authoritative
+ * result via the normal sendResponse path regardless of whether this
+ * notification arrives).
+ */
+function notifyDispatched(tabId, requestId) {
+  if (tabId === undefined) return;
+  try {
+    chrome.tabs.sendMessage(tabId, { type: MESSAGE_TYPES.TRANSLATION_DISPATCHED, requestId }).catch(() => {});
+  } catch {
+    // Synchronous throw is also possible in some Chrome versions if the tab
+    // is already gone — non-fatal either way.
+  }
+}
+
+/**
  * Runs makeCallFn, retrying up to TRANSLATION_MAX_RETRIES times (linear
  * backoff) before giving up — distinguishes "this one request had a hiccup"
  * (transient network blip, 429, 5xx) from "this content is genuinely
  * unavailable." Each attempt — the first try AND every retry — is its own
  * call to enqueueTranslationTask, so retries draw from the exact same
  * concurrency+RPM budget as first attempts; a retry can never bypass the
- * rate limiter or cause a burst.
+ * rate limiter or cause a burst. A STALE_TASK_RESULT resolution is NOT an
+ * error — it flows straight back out on the first attempt without ever
+ * entering the catch/retry branch below, so an invalidated task is never
+ * retried.
  */
-async function withRetry(makeCallFn) {
+async function withRetry(makeCallFn, tabId, generation, requestId) {
   let lastError;
   for (let attempt = 0; attempt <= TRANSLATION_MAX_RETRIES; attempt += 1) {
     if (attempt > 0) {
       await sleep(TRANSLATION_RETRY_BASE_DELAY_MS * attempt);
     }
     try {
-      return await enqueueTranslationTask(makeCallFn);
+      return await enqueueTranslationTask(makeCallFn, tabId, generation, requestId);
     } catch (err) {
       lastError = err;
     }
@@ -236,7 +348,7 @@ async function openHadithCheckerWithQuery(queryText) {
   await chrome.tabs.create({ url });
 }
 
-chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
+chrome.runtime.onMessage.addListener((message, sender, sendResponse) => {
   if (!message || message.target !== MESSAGE_TARGETS.BACKGROUND) {
     return undefined; // not addressed to us — let other listeners handle it
   }
@@ -248,16 +360,39 @@ chrome.runtime.onMessage.addListener((message, _sender, sendResponse) => {
     return true; // keep the message channel open for the async sendResponse above
   }
 
+  // STALE-QUEUE FIX: TRANSLATE_TEXT/TRANSLATE_BATCH carry the sending tab's
+  // id (from sender.tab, provided automatically by Chrome — never invented
+  // client-side) and the search "generation" the results page attached to
+  // the message (see app.js). registerGeneration() proactively purges any
+  // now-obsolete queued work from this same tab BEFORE this message's own
+  // task is enqueued, so a fresh search's very first request is never
+  // queued behind its own predecessor's leftovers.
   if (message.type === MESSAGE_TYPES.TRANSLATE_TEXT) {
-    withRetry(() => translateText(message.text, message.mode))
-      .then((translation) => sendResponse({ ok: true, translation }))
+    const tabId = sender?.tab?.id;
+    registerGeneration(tabId, message.generation);
+    withRetry(() => translateText(message.text, message.mode), tabId, message.generation, message.requestId)
+      .then((translation) => {
+        if (translation === STALE_TASK_RESULT) {
+          sendResponse({ ok: false, stale: true });
+          return;
+        }
+        sendResponse({ ok: true, translation });
+      })
       .catch((err) => sendResponse({ ok: false, error: describeError(err) }));
     return true;
   }
 
   if (message.type === MESSAGE_TYPES.TRANSLATE_BATCH) {
-    withRetry(() => translateFieldsBatch(message.fields))
-      .then((fields) => sendResponse({ ok: true, fields }))
+    const tabId = sender?.tab?.id;
+    registerGeneration(tabId, message.generation);
+    withRetry(() => translateFieldsBatch(message.fields), tabId, message.generation, message.requestId)
+      .then((fields) => {
+        if (fields === STALE_TASK_RESULT) {
+          sendResponse({ ok: false, stale: true });
+          return;
+        }
+        sendResponse({ ok: true, fields });
+      })
       .catch((err) => sendResponse({ ok: false, error: describeError(err) }));
     return true;
   }

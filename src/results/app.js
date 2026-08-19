@@ -55,6 +55,14 @@
 
 import { MESSAGE_TARGETS, MESSAGE_TYPES, DORAR_FIELD_LABELS } from '../shared/constants.js';
 import { looksArabic } from '../shared/language.js';
+import {
+  resolveNarratorField,
+  lookupScholar,
+  lookupSource,
+  lookupGrading,
+  lookupUsulSource,
+  lookupTakhrij,
+} from '../shared/dictionaries/index.js';
 
 const form = document.getElementById('search-form');
 const input = document.getElementById('query-input');
@@ -118,6 +126,104 @@ let usulSourcesCache = new Map();
 // list. Recreated (and the old one disconnected) on every new search.
 let mainListLazyObserver = null;
 
+// ---------------------------------------------------------------------------
+// STALE-QUEUE FIX (this pass) — search generation tracking.
+//
+// currentSearchGeneration increments once per runSearch() call (see below).
+// Every translation task created during a given search's render pass
+// captures THAT search's generation number as a plain parameter threaded
+// through the render/translate call chain (renderResults -> ... ->
+// runBatchTranslation / translateFieldGroup / translateOneField) — never
+// read fresh from this module-level variable at response time, since by
+// then a newer search may already have incremented it. Each outgoing
+// TRANSLATE_TEXT/TRANSLATE_BATCH message carries that captured generation;
+// the background (src/background/index.js) uses it to avoid ever
+// DISPATCHING now-obsolete queued work. This variable, here, is the
+// CURRENT generation — used only to decide, when a response finally
+// arrives (whether freshly dispatched or an old one that was already in
+// flight when a newer search started), whether it's still safe to touch
+// this tab's DOM/cache: if the response's captured generation no longer
+// matches this value, the result is silently discarded (see
+// isResponseStale below) rather than corrupting a newer search's state.
+let currentSearchGeneration = 0;
+
+function isResponseStale(searchGeneration) {
+  return searchGeneration !== currentSearchGeneration;
+}
+
+// ---------------------------------------------------------------------------
+// STALE-QUEUE FIX (this pass), Part 2 — "Queued…" vs "Translating…".
+//
+// requestId is generated fresh for each individual outbound TRANSLATE_TEXT/
+// TRANSLATE_BATCH message (unlike searchGeneration, it does not need to be
+// threaded through the render tree — it's created right where the message
+// is actually sent). pendingDispatchSlots maps a requestId to the slot
+// element(s) that message covers; the background sends a one-way
+// TRANSLATION_DISPATCHED notification (see background/index.js's
+// notifyDispatched) the instant that request's real Worker fetch begins,
+// letting those specific slots flip from "Queued…" to "Translating…". This
+// is a pure UI-truthfulness affordance: if the notification is ever missed
+// (tab busy, message dropped — chrome.tabs.sendMessage is best-effort), the
+// slot simply stays "Queued…" a little longer than ideal and still
+// resolves correctly the moment the real response arrives — never wrong,
+// never stuck.
+let nextRequestId = 1;
+const pendingDispatchSlots = new Map(); // requestId -> HTMLElement[]
+
+function registerPendingDispatch(requestId, slotEls) {
+  pendingDispatchSlots.set(requestId, slotEls);
+}
+
+function clearPendingDispatch(requestId) {
+  pendingDispatchSlots.delete(requestId);
+}
+
+chrome.runtime.onMessage.addListener((message) => {
+  if (!message || message.type !== MESSAGE_TYPES.TRANSLATION_DISPATCHED) return;
+  const slots = pendingDispatchSlots.get(message.requestId);
+  if (!slots) return;
+  pendingDispatchSlots.delete(message.requestId);
+  for (const slotEl of slots) {
+    if (slotEl.classList.contains('is-loading') && slotEl.textContent === 'Queued…') {
+      slotEl.textContent = 'Translating…';
+    }
+  }
+});
+
+// ---------------------------------------------------------------------------
+// LOCAL-LOOKUP INDICATOR — permanent feature, not a temporary/debug toggle.
+//
+// Every narrator/muhaddith/source/grading value that was resolved from the
+// local dictionaries (src/shared/dictionaries/) — never Gemini — gets a
+// tiny superscript "ᴸ" appended ONLY at render time, meaning "resolved from
+// a verified local lookup." This is presentation-only: the marker is never
+// written into translationCache (setCachedTranslation always stores the
+// plain, unmarked English text — see resolveLocalNameField's call sites
+// below), never sent to Gemini or anywhere else, and never affects which
+// branch (local vs Gemini) a value takes. localResolvedKeys is a separate
+// bookkeeping Set (not the translation cache itself) that remembers which
+// content-keys were resolved locally, purely so a later cache-hit render of
+// the SAME value still shows the marker consistently; it carries no
+// translated text, only keys, and is reset alongside the other session
+// caches on every new search. LOCAL_TRANSLATION_DEBUG stays a named
+// constant (clean, conventional way to gate this) rather than being
+// unconditionally inlined — kept `true` as the permanent, shipped setting.
+const LOCAL_TRANSLATION_DEBUG = true;
+const LOCAL_DEBUG_MARKER = 'ᴸ';
+
+let localResolvedKeys = new Set();
+
+function markLocallyResolved(mode, text) {
+  localResolvedKeys.add(cacheKeyForText(mode, text));
+}
+
+function withLocalDebugMarker(displayText, mode, sourceText) {
+  if (!LOCAL_TRANSLATION_DEBUG) return displayText;
+  return localResolvedKeys.has(cacheKeyForText(mode, sourceText))
+    ? `${displayText}${LOCAL_DEBUG_MARKER}`
+    : displayText;
+}
+
 function cacheKeyForText(mode, text) {
   return `${mode || 'prose'}::${text}`;
 }
@@ -176,10 +282,20 @@ async function runSearch(rawQuery) {
   translationCache = new Map();
   sharhTextCache = new Map();
   usulSourcesCache = new Map();
+  localResolvedKeys = new Set(); // debug-only bookkeeping, see its declaration above
   if (mainListLazyObserver) {
     mainListLazyObserver.disconnect();
     mainListLazyObserver = null;
   }
+
+  // STALE-QUEUE FIX: a brand-new generation for this search, captured here
+  // (not read fresh later) and threaded through the whole render/translate
+  // call chain below. Incremented unconditionally, even for an ultimately-
+  // invalid/empty query, matching the existing reset-everything-up-front
+  // pattern above — an old search's in-flight work is retired the instant a
+  // new search begins, regardless of whether the new one turns out valid.
+  currentSearchGeneration += 1;
+  const searchGeneration = currentSearchGeneration;
 
   if (!rawQuery) {
     setStatus('Please enter a search query.', 'error');
@@ -212,7 +328,7 @@ async function runSearch(rawQuery) {
 
     clearStatus();
     renderSummary(response);
-    renderResults(response.results);
+    renderResults(response.results, searchGeneration);
   } catch (err) {
     setStatus(`Extension error: ${err.message || err}`, 'error');
   } finally {
@@ -306,9 +422,9 @@ function observeForLazyTranslation(observer, element, callback) {
 // afterward).
 // ---------------------------------------------------------------------------
 
-function renderResults(results) {
+function renderResults(results, searchGeneration) {
   const rendered = results.map((result, index) => {
-    const { card, slots } = renderCard(result, index);
+    const { card, slots } = renderCard(result, index, searchGeneration);
     listEl.appendChild(card);
     return { result, slots, card };
   });
@@ -320,9 +436,11 @@ function renderResults(results) {
       // Still goes through the shared background queue — see background/
       // index.js. Auto-translating the first 5 never means firing 5+ raw
       // simultaneous Gemini calls.
-      translateAllFieldsForCard(result, slots);
+      translateAllFieldsForCard(result, slots, searchGeneration);
     } else {
-      observeForLazyTranslation(mainListLazyObserver, card, () => translateAllFieldsForCard(result, slots));
+      observeForLazyTranslation(mainListLazyObserver, card, () =>
+        translateAllFieldsForCard(result, slots, searchGeneration),
+      );
     }
   });
 }
@@ -345,7 +463,7 @@ function renderResults(results) {
 // narrow side-by-side columns.
 // ---------------------------------------------------------------------------
 
-function renderCard(result, index) {
+function renderCard(result, index, searchGeneration) {
   const card = document.createElement('article');
   card.className = 'hadith-card';
   const slots = {};
@@ -391,7 +509,7 @@ function renderCard(result, index) {
     appendTakhrijRow(card, result.takhrij, slots, rowCounter);
   }
 
-  const actionBar = renderActionBar(result);
+  const actionBar = renderActionBar(result, searchGeneration);
   if (actionBar) card.appendChild(placeInRow(actionBar, rowCounter));
 
   return { card, slots };
@@ -449,7 +567,7 @@ function appendPrimarySection(card, result, slots, rowCounter) {
   englishBlock.dir = 'ltr';
   englishBlock.lang = 'en';
   englishBlock.title = 'AI-generated translation — not Dorar’s own English wording.';
-  englishBlock.textContent = 'Translating…';
+  englishBlock.textContent = 'Queued…';
   slots.hadith = englishBlock;
   enCell.append(englishBlock);
 
@@ -544,7 +662,7 @@ function appendBilingualFieldRow(card, field, arabicValue, slots, mode, rowCount
   enValue.className = mode === 'name' ? 'translation-text name-english is-loading' : 'translation-text is-loading';
   enValue.dir = 'ltr';
   enValue.lang = 'en';
-  enValue.textContent = mode === 'name' ? '…' : 'Translating…';
+  enValue.textContent = mode === 'name' ? '…' : 'Queued…';
   slots[field.key] = enValue;
   enCell.append(enLabel, enValue);
 
@@ -586,7 +704,7 @@ function appendTakhrijRow(card, arabicValue, slots, rowCounter) {
   enValue.className = 'translation-text is-loading';
   enValue.dir = 'ltr';
   enValue.lang = 'en';
-  enValue.textContent = 'Translating…';
+  enValue.textContent = 'Queued…';
   slots.takhrij = enValue;
   enRow.append(enLabel, enValue);
 
@@ -623,7 +741,7 @@ function renderInlineTranslation(initialText) {
 // open inline instead).
 // ---------------------------------------------------------------------------
 
-function renderActionBar(result) {
+function renderActionBar(result, searchGeneration) {
   const actions = result.actions || {};
   const hasAny =
     actions.sharh || actions.similar || actions.usul || actions.alternateSahih || actions.asbabWurud;
@@ -638,7 +756,7 @@ function renderActionBar(result) {
     btn.type = 'button';
     btn.className = 'action-btn action-btn-sharh';
     btn.textContent = actionButtonText(labelKey);
-    btn.addEventListener('click', () => openSharhModal(result, actions.sharh.sharhId, labelKey));
+    btn.addEventListener('click', () => openSharhModal(result, actions.sharh.sharhId, labelKey, searchGeneration));
     bar.appendChild(btn);
   }
   if (actions.similar) {
@@ -649,7 +767,7 @@ function renderActionBar(result) {
     btn.type = 'button';
     btn.className = 'action-btn action-btn-usul';
     btn.textContent = actionButtonText('usul');
-    btn.addEventListener('click', () => openUsulModal(result, actions.usul.url));
+    btn.addEventListener('click', () => openUsulModal(result, actions.usul.url, searchGeneration));
     bar.appendChild(btn);
   }
   if (actions.alternateSahih) {
@@ -792,7 +910,7 @@ function renderModalRecap(result) {
   return recap;
 }
 
-function openSharhModal(result, sharhId, labelKey) {
+function openSharhModal(result, sharhId, labelKey, searchGeneration) {
   openModal((container, overlay) => {
     container.appendChild(renderModalRecap(result));
     container.appendChild(renderDivider());
@@ -807,14 +925,14 @@ function openSharhModal(result, sharhId, labelKey) {
     body.textContent = 'Loading…';
     container.appendChild(body);
 
-    loadSharh(sharhId, body, overlay);
+    loadSharh(sharhId, body, overlay, searchGeneration);
   });
 }
 
-async function loadSharh(sharhId, body, overlay) {
+async function loadSharh(sharhId, body, overlay, searchGeneration) {
   const cachedText = sharhTextCache.get(sharhId);
   if (cachedText) {
-    renderSharhBody(body, cachedText, overlay);
+    renderSharhBody(body, cachedText, overlay, searchGeneration);
     return;
   }
 
@@ -828,7 +946,7 @@ async function loadSharh(sharhId, body, overlay) {
       throw new Error(response?.error || 'unknown error');
     }
     sharhTextCache.set(sharhId, response.text);
-    renderSharhBody(body, response.text, overlay);
+    renderSharhBody(body, response.text, overlay, searchGeneration);
   } catch (err) {
     console.error(`Sharh fetch failed for ${sharhId}:`, err); // dev-visible only
     body.textContent = 'Could not load commentary right now.';
@@ -836,12 +954,24 @@ async function loadSharh(sharhId, body, overlay) {
   }
 }
 
-function renderSharhBody(body, arabicText, overlay) {
+function renderSharhBody(body, arabicText, overlay, searchGeneration) {
   body.textContent = ''; // safe: only text-content child elements appended below, never raw HTML
   body.classList.remove('is-unavailable');
 
   const chunks = chunkLongArabicText(arabicText);
-  const lazyObserver = createLazyObserver(overlay);
+  // PERFORMANCE PATCH (this pass, CHANGE 2): the FIRST chunk stays exactly as
+  // before — eager, standalone, translateOneField/TRANSLATE_TEXT — nothing
+  // to batch it with at that moment. Every later (lazy) chunk now goes
+  // through a dedicated batching-aware observer (below) instead of the
+  // shared createLazyObserver: existing chunk boundaries (chunkLongArabicText/
+  // MAX_CHUNK_CHARS) are completely unchanged, this only changes how many of
+  // those already-chunked pieces ride in one /translate-batch call when they
+  // become relevant at the same time (the modal's large rootMargin routinely
+  // makes several lazy chunks intersect together the moment the modal opens).
+  // A chunk that ends up intersecting alone still goes through the same
+  // grouped-batch call path, just as a group of one.
+  const sharhLazyObserver = createSharhBatchingLazyObserver(overlay, searchGeneration);
+  let sharhLazyKeyCounter = 0;
 
   chunks.forEach((chunkText, chunkIndex) => {
     const chunkEl = document.createElement('div');
@@ -854,16 +984,48 @@ function renderSharhBody(body, arabicText, overlay) {
     arabicEl.textContent = chunkText;
     chunkEl.appendChild(arabicEl);
 
-    const { wrap, slotEl } = renderInlineTranslation('Translating…');
+    const { wrap, slotEl } = renderInlineTranslation('Queued…');
     chunkEl.appendChild(wrap);
     body.appendChild(chunkEl);
 
     if (chunkIndex < EAGER_MODAL_CHUNK_COUNT) {
-      translateOneField('sharh', chunkText, slotEl);
+      translateOneField('sharh', chunkText, slotEl, undefined, undefined, searchGeneration);
     } else {
-      observeForLazyTranslation(lazyObserver, chunkEl, () => translateOneField('sharh', chunkText, slotEl));
+      const key = `sharh${sharhLazyKeyCounter}`;
+      sharhLazyKeyCounter += 1;
+      chunkEl.__sharhGroupItem = { key, arabicText: chunkText, slotEl, mode: undefined };
+      sharhLazyObserver.observe(chunkEl);
     }
   });
+}
+
+/**
+ * Like createLazyObserver, but scoped locally to ONE شرح modal (not shared
+ * with the main list or أصول, which keep using the original createLazyObserver
+ * unchanged) — whenever multiple observed chunks intersect in the SAME
+ * IntersectionObserver callback tick, they're grouped into one
+ * translateFieldGroup() call instead of firing one independently. Same
+ * rootMargin/threshold as createLazyObserver, so scroll-trigger behavior is
+ * otherwise identical to before.
+ */
+function createSharhBatchingLazyObserver(rootEl, searchGeneration) {
+  const observer = new IntersectionObserver(
+    (entries) => {
+      const nowVisible = [];
+      for (const entry of entries) {
+        if (!entry.isIntersecting) continue;
+        observer.unobserve(entry.target);
+        const item = entry.target.__sharhGroupItem;
+        entry.target.__sharhGroupItem = null;
+        if (item) nowVisible.push(item);
+      }
+      if (nowVisible.length > 0) {
+        translateFieldGroup(nowVisible, searchGeneration);
+      }
+    },
+    { root: rootEl || null, rootMargin: '600px 0px', threshold: 0 },
+  );
+  return observer;
 }
 
 /**
@@ -910,7 +1072,7 @@ function chunkLongArabicText(text) {
 // this modal.
 // ---------------------------------------------------------------------------
 
-function openUsulModal(result, url) {
+function openUsulModal(result, url, searchGeneration) {
   openModal((container, overlay) => {
     container.appendChild(renderModalRecap(result));
     container.appendChild(renderDivider());
@@ -925,14 +1087,14 @@ function openUsulModal(result, url) {
     body.textContent = 'Loading…';
     container.appendChild(body);
 
-    loadUsul(url, body, overlay);
+    loadUsul(url, body, overlay, searchGeneration);
   });
 }
 
-async function loadUsul(url, body, overlay) {
+async function loadUsul(url, body, overlay, searchGeneration) {
   const cachedSources = usulSourcesCache.get(url);
   if (cachedSources) {
-    renderUsulBody(body, cachedSources, overlay);
+    renderUsulBody(body, cachedSources, overlay, searchGeneration);
     return;
   }
 
@@ -946,7 +1108,7 @@ async function loadUsul(url, body, overlay) {
       throw new Error(response?.error || 'unknown error');
     }
     usulSourcesCache.set(url, response.sources);
-    renderUsulBody(body, response.sources, overlay);
+    renderUsulBody(body, response.sources, overlay, searchGeneration);
   } catch (err) {
     console.error(`Usul fetch failed for ${url}:`, err); // dev-visible only
     body.textContent = 'Could not load hadith origins right now.';
@@ -954,7 +1116,7 @@ async function loadUsul(url, body, overlay) {
   }
 }
 
-function renderUsulBody(body, sources, overlay) {
+function renderUsulBody(body, sources, overlay, searchGeneration) {
   body.textContent = '';
   body.classList.remove('is-unavailable');
 
@@ -966,11 +1128,11 @@ function renderUsulBody(body, sources, overlay) {
 
   const lazyObserver = createLazyObserver(overlay);
   sources.forEach((source, sourceIndex) => {
-    body.appendChild(renderUsulSourceEntry(source, sourceIndex, lazyObserver));
+    body.appendChild(renderUsulSourceEntry(source, sourceIndex, lazyObserver, searchGeneration));
   });
 }
 
-function renderUsulSourceEntry(source, sourceIndex, lazyObserver) {
+function renderUsulSourceEntry(source, sourceIndex, lazyObserver, searchGeneration) {
   const entry = document.createElement('div');
   entry.className = 'usul-source-entry';
 
@@ -979,32 +1141,39 @@ function renderUsulSourceEntry(source, sourceIndex, lazyObserver) {
   heading.textContent = `Source ${sourceIndex + 1}`;
   entry.appendChild(heading);
 
-  // Each field's translation is deferred into a task rather than fired
-  // immediately, so the WHOLE entry (all of its fields) can be translated
-  // together, either eagerly (entry 0) or lazily as one unit when this entry
-  // scrolls into view (entries 1+) — never one field now, one field later.
-  const translateTasks = [];
+  // PERFORMANCE PATCH (this pass, CHANGE 2): each field is now collected as a
+  // { key, arabicText, slotEl, mode, localLookupFn } descriptor rather than
+  // an independently-callable translation task — the whole entry's fields
+  // (Source/Chain/Wording) are then translated together in ONE
+  // /translate-batch call via translateFieldGroup, either eagerly (entry 0)
+  // or lazily as one unit when this entry scrolls into view (entries 1+) —
+  // same trigger points as before, just one network request instead of up
+  // to three. Cache/local-dictionary behavior for each field is completely
+  // unchanged (see translateFieldGroup) — only the Source field is eligible
+  // for the Usul/Sharh source dictionary, Chain/Wording always go to Gemini,
+  // exactly as before.
+  const fieldItems = [];
 
   if (source.source) {
-    entry.appendChild(renderUsulField('Source', source.source, 'name', translateTasks));
+    entry.appendChild(renderUsulField('Source', source.source, 'name', fieldItems, 'source', lookupUsulSource));
   }
   if (source.chain) {
-    entry.appendChild(renderUsulField('Chain (Isnad)', source.chain, undefined, translateTasks));
+    entry.appendChild(renderUsulField('Chain (Isnad)', source.chain, undefined, fieldItems, 'chain'));
   }
   if (source.hadithText) {
-    entry.appendChild(renderUsulField('Wording', source.hadithText, undefined, translateTasks));
+    entry.appendChild(renderUsulField('Wording', source.hadithText, undefined, fieldItems, 'wording'));
   }
 
   if (sourceIndex < EAGER_MODAL_CHUNK_COUNT) {
-    translateTasks.forEach((run) => run());
+    translateFieldGroup(fieldItems, searchGeneration);
   } else {
-    observeForLazyTranslation(lazyObserver, entry, () => translateTasks.forEach((run) => run()));
+    observeForLazyTranslation(lazyObserver, entry, () => translateFieldGroup(fieldItems, searchGeneration));
   }
 
   return entry;
 }
 
-function renderUsulField(label, arabicValue, mode, translateTasks) {
+function renderUsulField(label, arabicValue, mode, fieldItems, batchKey, localLookupFn) {
   const row = document.createElement('div');
   row.className = 'field-row field-row-prose';
 
@@ -1020,10 +1189,10 @@ function renderUsulField(label, arabicValue, mode, translateTasks) {
   labelLine.append(labelEl, arabicEl);
   row.appendChild(labelLine);
 
-  const { wrap, slotEl } = renderInlineTranslation(mode === 'name' ? '…' : 'Translating…');
+  const { wrap, slotEl } = renderInlineTranslation(mode === 'name' ? '…' : 'Queued…');
   row.appendChild(wrap);
 
-  translateTasks.push(() => translateOneField('usul', arabicValue, slotEl, mode));
+  fieldItems.push({ key: batchKey, arabicText: arabicValue, slotEl, mode, localLookupFn });
 
   return row;
 }
@@ -1033,13 +1202,37 @@ function renderUsulField(label, arabicValue, mode, translateTasks) {
 // the shared background service worker now, see the file-level note). This
 // section just: checks the per-tab cache, fires a message if not cached,
 // and updates the cache + DOM on response.
+//
+// LOCAL-FIRST DICTIONARIES (this pass): before falling back to Gemini, the
+// three structured NAME_FIELDS (narrator/muhaddith/source — never the
+// prose fields above) are checked against src/shared/dictionaries/ for a
+// safe exact match. Field-aware and exact-match only, by construction: see
+// resolveLocalNameField below and the dictionaries' own file-level notes
+// for the live Dorar verification behind them. Everything else about the
+// translation pipeline (queue, retry, RPM limiter, session cache, batching)
+// is completely unchanged — a local hit just means fieldsToRequest never
+// gets that one key, so it's simply never sent to Gemini.
 // ---------------------------------------------------------------------------
+
+/**
+ * Returns a safe local English translation for one NAME_FIELDS value, or
+ * null if there is no safe local match (caller falls back to Gemini).
+ * fieldKey is always exactly 'narrator' | 'muhaddith' | 'source' here — the
+ * PROSE_FIELDS loop (hadith/grading/takhrij) never calls this function, so
+ * these dictionaries can never be applied to prose, by construction.
+ */
+function resolveLocalNameField(fieldKey, value) {
+  if (fieldKey === 'narrator') return resolveNarratorField(value);
+  if (fieldKey === 'muhaddith') return lookupScholar(value);
+  if (fieldKey === 'source') return lookupSource(value);
+  return null;
+}
 
 /**
  * Translates one result's fields in ONE Gemini call (the batch endpoint),
  * after filtering out anything already in the content-keyed cache.
  */
-function translateAllFieldsForCard(result, slots) {
+function translateAllFieldsForCard(result, slots, searchGeneration) {
   const fieldsToRequest = {};
   const slotInfoByKey = {};
 
@@ -1050,9 +1243,42 @@ function translateAllFieldsForCard(result, slots) {
 
     const cached = getCachedTranslation(undefined, value);
     if (cached) {
-      setTranslationContent(slotEl, cached, 'done');
+      setTranslationContent(slotEl, withLocalDebugMarker(cached, undefined, value), 'done');
       continue;
     }
+
+    // Local-first, GRADING ONLY: a safe exact match against a short list of
+    // standard classical grading verdicts bypasses Gemini. field.key check
+    // keeps this scoped exactly to 'grading' — hadith and takhrij share this
+    // loop but never reach this branch, so they can never be looked up here.
+    if (field.key === 'grading') {
+      const localGrading = lookupGrading(value);
+      if (localGrading) {
+        setCachedTranslation(undefined, value, localGrading);
+        markLocallyResolved(undefined, value);
+        setTranslationContent(slotEl, withLocalDebugMarker(localGrading, undefined, value), 'done');
+        continue;
+      }
+    }
+
+    // Local-first, TAKHRIJ ONLY: a safe exact-construction match against a
+    // small set of common attribution formulae (أخرجه/رواه + a single known
+    // compiler, or a handful of fixed phrases like متفق عليه) bypasses
+    // Gemini. field.key check keeps this scoped exactly to 'takhrij' —
+    // hadith and grading share this loop but never reach this branch. See
+    // dictionaries/takhrij.js and lookupTakhrij for the exact-construction
+    // matching rules — never a substring/word replacement inside a longer
+    // or multi-scholar Takhrij sentence, which still falls to Gemini whole.
+    if (field.key === 'takhrij') {
+      const localTakhrij = lookupTakhrij(value);
+      if (localTakhrij) {
+        setCachedTranslation(undefined, value, localTakhrij);
+        markLocallyResolved(undefined, value);
+        setTranslationContent(slotEl, withLocalDebugMarker(localTakhrij, undefined, value), 'done');
+        continue;
+      }
+    }
+
     fieldsToRequest[field.key] = value;
     slotInfoByKey[field.key] = { slotEl, mode: undefined, value };
   }
@@ -1064,9 +1290,23 @@ function translateAllFieldsForCard(result, slots) {
 
     const cached = getCachedTranslation('name', value);
     if (cached) {
-      setTranslationContent(slotEl, cached, 'done');
+      setTranslationContent(slotEl, withLocalDebugMarker(cached, 'name', value), 'done');
       continue;
     }
+
+    // Local-first: a safe exact match in the narrator/scholar/source
+    // dictionary bypasses Gemini entirely. Field-aware by construction —
+    // field.key here is only ever 'narrator'/'muhaddith'/'source' (this is
+    // the NAME_FIELDS loop; hadith/grading/takhrij live in the separate
+    // PROSE_FIELDS loop above and are never touched by these dictionaries).
+    const localMatch = resolveLocalNameField(field.key, value);
+    if (localMatch) {
+      setCachedTranslation('name', value, localMatch);
+      markLocallyResolved('name', value);
+      setTranslationContent(slotEl, withLocalDebugMarker(localMatch, 'name', value), 'done');
+      continue;
+    }
+
     fieldsToRequest[field.key] = value;
     slotInfoByKey[field.key] = { slotEl, mode: 'name', value };
   }
@@ -1076,19 +1316,35 @@ function translateAllFieldsForCard(result, slots) {
 
   for (const key of keysToRequest) {
     const { slotEl, mode } = slotInfoByKey[key];
-    setTranslationContent(slotEl, mode === 'name' ? '…' : 'Translating…', 'loading');
+    setTranslationContent(slotEl, mode === 'name' ? '…' : 'Queued…', 'loading');
   }
 
-  runBatchTranslation(fieldsToRequest, slotInfoByKey);
+  runBatchTranslation(fieldsToRequest, slotInfoByKey, searchGeneration);
 }
 
-async function runBatchTranslation(fieldsToRequest, slotInfoByKey) {
+async function runBatchTranslation(fieldsToRequest, slotInfoByKey, searchGeneration) {
+  const requestId = nextRequestId++;
+  registerPendingDispatch(
+    requestId,
+    Object.keys(fieldsToRequest).map((key) => slotInfoByKey[key].slotEl),
+  );
+
   try {
     const response = await sendMessage({
       target: MESSAGE_TARGETS.BACKGROUND,
       type: MESSAGE_TYPES.TRANSLATE_BATCH,
       fields: fieldsToRequest,
+      generation: searchGeneration,
+      requestId,
     });
+    clearPendingDispatch(requestId);
+
+    // STALE-QUEUE FIX: a newer search may have started while this request
+    // was queued/in flight. Discard the result entirely — touch neither the
+    // cache nor the DOM — rather than let an old search's response corrupt
+    // whatever the user is looking at now.
+    if (isResponseStale(searchGeneration)) return;
+
     if (!response || !response.ok) {
       throw new Error(response?.error || 'unknown error');
     }
@@ -1107,6 +1363,8 @@ async function runBatchTranslation(fieldsToRequest, slotInfoByKey) {
       }
     }
   } catch (err) {
+    clearPendingDispatch(requestId);
+    if (isResponseStale(searchGeneration)) return; // stale failure — never touch a newer search's DOM either
     // The background already retried transiently-failing requests before
     // giving up (see background/index.js's withRetry) — reaching here means
     // it genuinely could not get a translation, not a single hiccup.
@@ -1118,18 +1376,152 @@ async function runBatchTranslation(fieldsToRequest, slotInfoByKey) {
   }
 }
 
+// ---------------------------------------------------------------------------
+// PERFORMANCE PATCH (this pass, CHANGE 2) — generalized batching for شرح and
+// أصول الحديث, reusing the EXACT SAME /translate-batch endpoint, request
+// shape, and cache/local-dictionary-first pattern as translateAllFieldsForCard
+// above (which is left completely untouched — this is an ADDITIONAL helper,
+// not a refactor of the main-list path). Call sites (renderUsulSourceEntry
+// and renderSharhBody's lazy chunk path, below) build an array of
+// { key, arabicText, slotEl, mode, localLookupFn } items that became
+// relevant together (one أصول source entry's fields, or several شرح chunks
+// that scrolled into view in the same tick) and pass the whole group here in
+// one call. Cache hits and local-dictionary hits still render instantly and
+// never reach the network, exactly like the main list. Whatever remains is
+// sent in as few /translate-batch calls as possible (split only if it would
+// exceed the Worker's BATCH_MAX_FIELDS cap — see worker/src/index.js).
+// ---------------------------------------------------------------------------
+
+const FIELD_GROUP_BATCH_MAX_FIELDS = 8; // mirrors worker/src/index.js's BATCH_MAX_FIELDS
+
+async function translateFieldGroup(items, searchGeneration) {
+  const toRequest = {};
+  const infoByKey = {};
+
+  for (const item of items) {
+    const { key, arabicText, slotEl, mode, localLookupFn } = item;
+
+    const cached = getCachedTranslation(mode, arabicText);
+    if (cached) {
+      setTranslationContent(slotEl, withLocalDebugMarker(cached, mode, arabicText), 'done');
+      continue;
+    }
+
+    if (localLookupFn) {
+      const localMatch = localLookupFn(arabicText);
+      if (localMatch) {
+        setCachedTranslation(mode, arabicText, localMatch);
+        markLocallyResolved(mode, arabicText);
+        setTranslationContent(slotEl, withLocalDebugMarker(localMatch, mode, arabicText), 'done');
+        continue;
+      }
+    }
+
+    toRequest[key] = arabicText;
+    infoByKey[key] = { slotEl, mode, arabicText };
+  }
+
+  const keys = Object.keys(toRequest);
+  if (keys.length === 0) return; // everything was cached or resolved locally
+
+  for (const key of keys) {
+    const { slotEl, mode } = infoByKey[key];
+    setTranslationContent(slotEl, mode === 'name' ? '…' : 'Queued…', 'loading');
+  }
+
+  // Defensive split: keeps every single /translate-batch call within the
+  // Worker's own BATCH_MAX_FIELDS cap, even in the (rare) case that more
+  // than 8 شرح chunks intersect together in one observer tick.
+  const batches = [];
+  for (let i = 0; i < keys.length; i += FIELD_GROUP_BATCH_MAX_FIELDS) {
+    batches.push(keys.slice(i, i + FIELD_GROUP_BATCH_MAX_FIELDS));
+  }
+
+  await Promise.all(
+    batches.map((batchKeys) => runFieldGroupBatch(batchKeys, toRequest, infoByKey, searchGeneration)),
+  );
+}
+
+async function runFieldGroupBatch(batchKeys, toRequest, infoByKey, searchGeneration) {
+  const fieldsToRequest = {};
+  for (const key of batchKeys) {
+    fieldsToRequest[key] = toRequest[key];
+  }
+
+  const requestId = nextRequestId++;
+  registerPendingDispatch(
+    requestId,
+    batchKeys.map((key) => infoByKey[key].slotEl),
+  );
+
+  try {
+    const response = await sendMessage({
+      target: MESSAGE_TARGETS.BACKGROUND,
+      type: MESSAGE_TYPES.TRANSLATE_BATCH,
+      fields: fieldsToRequest,
+      generation: searchGeneration,
+      requestId,
+    });
+    clearPendingDispatch(requestId);
+    if (isResponseStale(searchGeneration)) return; // see runBatchTranslation's identical gate
+
+    if (!response || !response.ok) {
+      throw new Error(response?.error || 'unknown error');
+    }
+
+    const translatedFields = response.fields || {};
+    for (const key of batchKeys) {
+      const { slotEl, mode, arabicText } = infoByKey[key];
+      const translation = translatedFields[key];
+      if (typeof translation === 'string' && translation.trim()) {
+        setCachedTranslation(mode, arabicText, translation.trim());
+        setTranslationContent(slotEl, translation.trim(), 'done');
+      } else {
+        markUnavailable(slotEl, mode);
+      }
+    }
+  } catch (err) {
+    clearPendingDispatch(requestId);
+    if (isResponseStale(searchGeneration)) return;
+    console.error('Grouped batch translation failed:', err); // dev-visible only
+    for (const key of batchKeys) {
+      const { slotEl, mode } = infoByKey[key];
+      markUnavailable(slotEl, mode);
+    }
+  }
+}
+
 /**
  * Used by شرح / أصول content, which is fetched on demand rather than known
  * up front — one field/chunk at a time, still content-cached.
  */
-async function translateOneField(debugLabel, arabicText, slotEl, mode) {
+async function translateOneField(debugLabel, arabicText, slotEl, mode, localLookupFn, searchGeneration) {
   const cached = getCachedTranslation(mode, arabicText);
   if (cached) {
-    setTranslationContent(slotEl, cached, 'done');
+    setTranslationContent(slotEl, withLocalDebugMarker(cached, mode, arabicText), 'done');
     return;
   }
 
-  setTranslationContent(slotEl, mode === 'name' ? '…' : 'Translating…', 'loading');
+  // Optional local-first lookup — used ONLY by the أصول الحديث modal's
+  // structured Source field (see renderUsulSourceEntry), which passes
+  // lookupUsulSource here explicitly. Every other caller (شرح chunks,
+  // أصول's own Chain/Wording fields) omits this argument entirely, so this
+  // block is a complete no-op for them — unchanged behavior, unchanged
+  // Gemini path below.
+  if (localLookupFn) {
+    const localMatch = localLookupFn(arabicText);
+    if (localMatch) {
+      setCachedTranslation(mode, arabicText, localMatch);
+      markLocallyResolved(mode, arabicText);
+      setTranslationContent(slotEl, withLocalDebugMarker(localMatch, mode, arabicText), 'done');
+      return;
+    }
+  }
+
+  setTranslationContent(slotEl, mode === 'name' ? '…' : 'Queued…', 'loading');
+
+  const requestId = nextRequestId++;
+  registerPendingDispatch(requestId, [slotEl]);
 
   try {
     const response = await sendMessage({
@@ -1137,13 +1529,20 @@ async function translateOneField(debugLabel, arabicText, slotEl, mode) {
       type: MESSAGE_TYPES.TRANSLATE_TEXT,
       text: arabicText,
       mode,
+      generation: searchGeneration,
+      requestId,
     });
+    clearPendingDispatch(requestId);
+    if (isResponseStale(searchGeneration)) return; // see runBatchTranslation's identical gate
+
     if (!response || !response.ok) {
       throw new Error(response?.error || 'unknown error');
     }
     setCachedTranslation(mode, arabicText, response.translation);
     setTranslationContent(slotEl, response.translation, 'done');
   } catch (err) {
+    clearPendingDispatch(requestId);
+    if (isResponseStale(searchGeneration)) return;
     console.error(`Translation failed (${debugLabel}):`, err); // dev-visible only
     markUnavailable(slotEl, mode);
   }

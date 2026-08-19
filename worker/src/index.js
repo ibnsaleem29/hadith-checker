@@ -43,6 +43,18 @@
 
 const MODEL_ID = 'gemini-3.5-flash-lite';
 const GEMINI_ENDPOINT = `https://generativelanguage.googleapis.com/v1beta/models/${MODEL_ID}:generateContent`;
+// PERFORMANCE PATCH (this pass, CHANGE 3): a conservative cap on the Worker
+// -> Gemini call itself. Without this, a genuinely slow/hung Gemini response
+// had no ceiling and could occupy one of the extension's translation-
+// concurrency slots indefinitely. AbortSignal.timeout() rejects the fetch
+// with a TimeoutError once the deadline passes; that rejection propagates
+// out of runModel/runModelJson exactly like any other failure and is caught
+// by the existing per-endpoint try/catch -> handleModelError() (a normal 502
+// response) — no new special-casing needed, so it flows through the
+// extension's EXISTING retry path (background/index.js's withRetry) exactly
+// like a real network failure or a 5xx from Gemini. Does not change retry
+// count, backoff, or the RPM limiter.
+const GEMINI_REQUEST_TIMEOUT_MS = 15000;
 // Raised from 4000: real شرح content observed live up to ~5800 characters
 // (id 163874) was being rejected outright by the old limit. This model's
 // context window is large (256K tokens per the live docs check during the
@@ -99,8 +111,21 @@ Return only the Arabic search query text, with no preface, labels, quotation mar
 // prose (translate faithfully), some are proper names/titles (transliterate,
 // don't translate meaning) — the model is told explicitly which is which by
 // key name, and asked to return a same-shaped JSON object.
-const BATCH_SYSTEM_PROMPT = `You will receive a JSON object describing one hadith result from Dorar.net. Its keys are Arabic text of two different kinds:
-- "hadith", "grading", "takhrij": free-form Arabic prose. Translate each faithfully into natural, academic English. Preserve every qualification, attribution, name, number, and citation exactly. Do not summarize, simplify, invent information, or harmonize scholarly disagreements. Write fluent, grammatically correct English — not a literal word-for-word rendering. When a technical hadith-science term has no single perfect English equivalent, render it as a natural English phrase or clause, optionally with the transliterated Arabic term in parentheses.
+//
+// PERFORMANCE PATCH (this pass, CHANGE 2): extended — additively, no wording
+// of the actual translation instructions changed — to also recognize the key
+// names results/app.js now uses when batching شرح (commentary) chunks and
+// أصول الحديث (Chain/Wording) fields into this SAME endpoint, instead of one
+// /translate call per chunk/field. "chain" and "wording" are simply added to
+// the existing prose-key list (they are exactly that: free-form prose, same
+// as hadith/grading/takhrij). شرح chunks use synthetic keys "sharh0",
+// "sharh1", ... (one JSON object per group of chunks that became visible
+// together) — recognized via the same "starts with sharh" rule, also
+// prose. "source" (used for both the main list's Source field AND أصول's
+// structured Source field, when it isn't already resolved locally) already
+// matched the existing name/transliteration rule and needed no change.
+const BATCH_SYSTEM_PROMPT = `You will receive a JSON object of Arabic text values — either one hadith result's fields, or a group of related شرح (commentary) or أصول الحديث (hadith-principles) fields/chunks. Its keys are Arabic text of two different kinds:
+- "hadith", "grading", "takhrij", "chain", "wording", and any key starting with "sharh" (e.g. "sharh0", "sharh1"): free-form Arabic prose. Translate each faithfully into natural, academic English. Preserve every qualification, attribution, name, number, and citation exactly. Do not summarize, simplify, invent information, or harmonize scholarly disagreements. Write fluent, grammatically correct English — not a literal word-for-word rendering. When a technical hadith-science term has no single perfect English equivalent, render it as a natural English phrase or clause, optionally with the transliterated Arabic term in parentheses.
 - "narrator", "muhaddith", "source": an Arabic proper name or book title, not prose. For each, return its standard English scholarly transliteration/romanization (using conventional Islamic-studies romanization, e.g. macrons and ʿayn/hamza marks where standard), or the well-established standard English rendering if the title has one. Do not translate the meaning of a name into ordinary English words.
 
 Return ONLY a single JSON object with exactly the same keys you were given (only the keys present in the input — omit none, add none), each mapped to its English value as a plain string. No markdown code fences, no commentary, no nested objects — just the raw JSON object.`;
@@ -228,6 +253,7 @@ async function runModelJson(env, systemPrompt, userText) {
         responseMimeType: 'application/json',
       },
     }),
+    signal: AbortSignal.timeout(GEMINI_REQUEST_TIMEOUT_MS),
   });
 
   if (!response.ok) {
@@ -273,6 +299,7 @@ async function runModel(env, systemPrompt, userText) {
         temperature: 0.2,
       },
     }),
+    signal: AbortSignal.timeout(GEMINI_REQUEST_TIMEOUT_MS),
   });
 
   if (!response.ok) {

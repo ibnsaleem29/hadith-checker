@@ -1,12 +1,12 @@
 {
   "manifest_version": 3,
   "name": "Hadith Checker [English & Arabic]",
-  "version": "1.0.0",
-  "description": "Search Hadith on Dorar.net in Arabic and English — translations, grading, sources, and commentary.",
+  "version": "1.0.1",
+  "description": "Research & Explore Hadith in English & Arabic — translations, grading, sources, takhreej & sharh from scholarly supervised Dorar.net",
   "permissions": ["sidePanel", "offscreen", "contextMenus", "storage"],
   "host_permissions": [
     "https://dorar.net/*",
-    "https://hadith-checker-worker.oomarshah29.workers.dev/*"
+    "https://hadith-checker-worker.hadithchecker.workers.dev/*"
   ],
   "background": {
     "service_worker": "src/background/index.js",

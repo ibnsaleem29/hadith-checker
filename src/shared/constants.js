@@ -22,6 +22,15 @@ export const MESSAGE_TYPES = {
   // Functional-bug-fix pass additions.
   PARSE_USUL_HTML: 'PARSE_USUL_HTML', // offscreen: parse an أصول الحديث page into {sources}
   FETCH_USUL: 'FETCH_USUL', // background: fetch + parse أصول الحديث content for one result
+  // STALE-QUEUE-FIX pass addition: a one-way, background-initiated
+  // notification (via chrome.tabs.sendMessage, not a response to any
+  // TRANSLATE_* call) sent to the originating tab at the exact moment a
+  // queued translation task is actually dispatched (its real Worker fetch
+  // begins) — lets the UI distinguish "Queued…" (task scheduled, not yet
+  // dispatched) from "Translating…" (network request genuinely in
+  // flight). See background/index.js's pumpTranslationQueue and
+  // results/app.js's onMessage listener for TRANSLATION_DISPATCHED.
+  TRANSLATION_DISPATCHED: 'TRANSLATION_DISPATCHED',
 };
 
 // Arabic field labels as they literally appear in Dorar's search-result markup.
