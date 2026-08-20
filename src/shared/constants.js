@@ -31,6 +31,17 @@ export const MESSAGE_TYPES = {
   // flight). See background/index.js's pumpTranslationQueue and
   // results/app.js's onMessage listener for TRANSLATION_DISPATCHED.
   TRANSLATION_DISPATCHED: 'TRANSLATION_DISPATCHED',
+  // V1.0.2 PERFORMANCE PASS addition: a one-way, background-initiated
+  // notification, same delivery mechanism as TRANSLATION_DISPATCHED (via
+  // chrome.tabs.sendMessage, correlated by the same requestId), sent the
+  // moment withRetry() detects a genuine HTTP 429 from the Worker and is
+  // about to wait before its next retry attempt. Lets the UI show
+  // "Translation temporarily delayed — continuing automatically in a few
+  // seconds." instead of leaving a generic "Translating…" state up during
+  // an actual rate-limit backoff. Purely a UI-affordance signal — the retry
+  // itself still goes through the exact same central queue/RPM limiter
+  // regardless of whether this notification is delivered.
+  TRANSLATION_RATE_LIMITED: 'TRANSLATION_RATE_LIMITED',
 };
 
 // Arabic field labels as they literally appear in Dorar's search-result markup.

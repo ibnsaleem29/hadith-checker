@@ -258,7 +258,7 @@ async function runModelJson(env, systemPrompt, userText) {
 
   if (!response.ok) {
     const errorBody = await response.text().catch(() => '');
-    throw new Error(`Gemini API returned HTTP ${response.status}: ${errorBody.slice(0, 300)}`);
+    throw buildUpstreamError(response, errorBody);
   }
 
   const result = await response.json();
@@ -304,7 +304,7 @@ async function runModel(env, systemPrompt, userText) {
 
   if (!response.ok) {
     const errorBody = await response.text().catch(() => '');
-    throw new Error(`Gemini API returned HTTP ${response.status}: ${errorBody.slice(0, 300)}`);
+    throw buildUpstreamError(response, errorBody);
   }
 
   const result = await response.json();
@@ -315,6 +315,23 @@ async function runModel(env, systemPrompt, userText) {
     throw new Error('Model returned an unrecognized or empty response.');
   }
   return text.trim();
+}
+
+/**
+ * V1.0.2 PERFORMANCE PASS: preserves Gemini's real HTTP status (specifically
+ * 429) and any Retry-After header it sent, as properties on the thrown
+ * Error, INSTEAD of collapsing every upstream failure into an opaque 502
+ * (handleModelError below still decides what status/body the EXTENSION
+ * actually sees — this only carries the raw signal that far). Everything
+ * else about error handling is unchanged: the raw Gemini error body is
+ * still never exposed to the caller, still only logged server-side.
+ */
+function buildUpstreamError(response, errorBody) {
+  const err = new Error(`Gemini API returned HTTP ${response.status}: ${errorBody.slice(0, 300)}`);
+  err.upstreamStatus = response.status;
+  const retryAfter = response.headers.get('Retry-After');
+  if (retryAfter) err.retryAfterHeader = retryAfter;
+  return err;
 }
 
 function validateText(text) {
@@ -343,6 +360,19 @@ function handleModelError(err) {
   // Logged for development only — never expose raw stack traces, response
   // bodies, or (obviously) the API key to the caller.
   console.error('Gemini call failed:', err);
+
+  // V1.0.2 PERFORMANCE PASS: a genuine 429 from Gemini is surfaced to the
+  // extension AS a 429 (instead of the generic 502 every other failure
+  // gets), with Retry-After passed through if Gemini provided one — this is
+  // the ONLY signal the extension's retry logic (background/index.js's
+  // withRetry) has to distinguish "rate limited, back off intelligently"
+  // from "something else went wrong, use the normal retry delay." The
+  // message text stays the same generic, non-leaking wording either way.
+  if (err && err.upstreamStatus === 429) {
+    const headers = err.retryAfterHeader ? { 'Retry-After': err.retryAfterHeader } : undefined;
+    return jsonError('Translation service is temporarily rate-limited.', 429, headers);
+  }
+
   return jsonError('Translation service is temporarily unavailable.', 502);
 }
 
@@ -353,10 +383,10 @@ function jsonOk(data) {
   });
 }
 
-function jsonError(message, status) {
+function jsonError(message, status, extraHeaders) {
   return new Response(JSON.stringify({ error: message }), {
     status,
-    headers: { 'Content-Type': 'application/json', ...corsHeaders() },
+    headers: { 'Content-Type': 'application/json', ...corsHeaders(), ...extraHeaders },
   });
 }
 
@@ -368,5 +398,12 @@ function corsHeaders() {
     'Access-Control-Allow-Origin': '*',
     'Access-Control-Allow-Methods': 'POST, OPTIONS',
     'Access-Control-Allow-Headers': 'Content-Type',
+    // V1.0.2 PERFORMANCE PASS: Retry-After is not one of the CORS-safelisted
+    // response headers, so without explicitly exposing it, the extension's
+    // fetch() would silently see `null` from response.headers.get(...) even
+    // when this Worker did send the header on the wire. Needed for
+    // handleModelError's 429 Retry-After passthrough to actually reach
+    // aiClient.js.
+    'Access-Control-Expose-Headers': 'Retry-After',
   };
 }

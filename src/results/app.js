@@ -44,14 +44,29 @@
 // SESSION CACHE (clarified this pass): "session" means ONE search. Every
 // explicit new search submission (search icon / Enter / search button) —
 // even one that differs from the previous query by a single word or a
-// diacritic — starts a brand-new session: the cache is cleared unconditionally
-// at the top of runSearch(), regardless of how similar the new query or its
-// results are to the previous search. The only other thing that resets it is
-// a page refresh/crash (which loses this in-memory state naturally, since
-// nothing here ever touches chrome.storage/localStorage/IndexedDB). Within
-// one unchanged session, already-translated text — whether a main list field,
-// a شرح chunk, or an أصول source field — is never re-sent to Gemini, no
-// matter how many times its card/modal is scrolled past, closed, or reopened.
+// diacritic — starts a brand-new session: the in-memory cache is cleared
+// unconditionally at the top of runSearch(), regardless of how similar the
+// new query or its results are to the previous search. The only other thing
+// that resets it is a page refresh/crash (which loses this in-memory state
+// naturally). Within one unchanged session, already-translated text —
+// whether a main list field, a شرح chunk, or an أصول source field — is never
+// re-sent to Gemini, no matter how many times its card/modal is scrolled
+// past, closed, or reopened.
+//
+// V1.0.2 PERFORMANCE PASS — TWO complementary cache layers now exist:
+//   1. The in-memory session cache above (translationCache, unchanged in
+//      nature — still per-tab, still wiped every new search).
+//   2. A NEW 15-day persistent cache (src/shared/translationCache.js),
+//      backed by chrome.storage.local — belongs to this browser
+//      installation only, survives page refreshes/restarts/new searches,
+//      expires entries after 15 days, and is consulted ONLY after both the
+//      local dictionaries AND the session cache have already missed:
+//        local dictionary -> session cache -> 15-day persistent cache -> Gemini
+//      Neither cache replaces the other; see that module's file-level
+//      comment for the full storage-mechanism/key/TTL rationale. A
+//      persistent-cache failure (storage full/unavailable/corrupt) always
+//      degrades silently to "fall through to Gemini" — never breaks
+//      translation.
 
 import { MESSAGE_TARGETS, MESSAGE_TYPES, DORAR_FIELD_LABELS } from '../shared/constants.js';
 import { looksArabic } from '../shared/language.js';
@@ -63,6 +78,11 @@ import {
   lookupUsulSource,
   lookupTakhrij,
 } from '../shared/dictionaries/index.js';
+import {
+  buildTranslationCacheKey,
+  getPersistentTranslation,
+  setPersistentTranslation,
+} from '../shared/translationCache.js';
 
 const form = document.getElementById('search-form');
 const input = document.getElementById('query-input');
@@ -103,7 +123,13 @@ const ACTION_LABELS = {
 // How many of the top rendered results auto-translate immediately on search
 // load. Everything after this translates lazily (IntersectionObserver) as
 // the user scrolls near it.
-const AUTO_TRANSLATE_COUNT = 5;
+//
+// V1.0.2 PERFORMANCE PASS: reduced from 5 to 3 — results far below the
+// viewport were consuming RPM budget and dispatch slots before the user had
+// scrolled anywhere near them. Lazy loading (below) is completely
+// unchanged; this only shrinks the eager burst that fires the instant a
+// search loads, prioritizing the content actually in view.
+const AUTO_TRANSLATE_COUNT = 3;
 
 // Long شرح/أصول content is broken into chunks translated progressively; only
 // the first chunk (visible the instant the modal opens) translates eagerly,
@@ -178,14 +204,57 @@ function clearPendingDispatch(requestId) {
   pendingDispatchSlots.delete(requestId);
 }
 
+// V1.0.2 PERFORMANCE PASS — exact user-facing translation-state wording
+// (specified verbatim by requirement, not free-form copy). Used for every
+// loading-state slot across the main list, شرح, and أصول.
+const STATUS_QUEUED = 'Queued for translation, will be sent shortly';
+const STATUS_TRANSLATING = 'Translating, please hold on a moment';
+const STATUS_RATE_LIMITED = 'Translation temporarily delayed — continuing automatically in a few seconds.';
+
 chrome.runtime.onMessage.addListener((message) => {
-  if (!message || message.type !== MESSAGE_TYPES.TRANSLATION_DISPATCHED) return;
-  const slots = pendingDispatchSlots.get(message.requestId);
-  if (!slots) return;
-  pendingDispatchSlots.delete(message.requestId);
-  for (const slotEl of slots) {
-    if (slotEl.classList.contains('is-loading') && slotEl.textContent === 'Queued…') {
-      slotEl.textContent = 'Translating…';
+  if (!message) return;
+
+  if (message.type === MESSAGE_TYPES.TRANSLATION_DISPATCHED) {
+    // V1.0.2 CORRECTION: does NOT delete the pendingDispatchSlots entry
+    // here (v1.0.1 did — harmless there, since nothing else depended on the
+    // entry surviving past the first dispatch). This entry must now survive
+    // across MULTIPLE dispatch notifications for the SAME requestId — a
+    // retried request dispatches more than once (once per attempt), and a
+    // 429-triggered retry needs TRANSLATION_RATE_LIMITED to still find this
+    // entry AFTER the first dispatch already fired. The entry is removed
+    // exactly once, only when the request truly settles (success or final
+    // failure) — see clearPendingDispatch, called from the response-handler
+    // functions below (runBatchTranslation / runFieldGroupBatch /
+    // translateOneField) — never from this notification handler.
+    const slots = pendingDispatchSlots.get(message.requestId);
+    if (!slots) return;
+    for (const slotEl of slots) {
+      // Checking the `is-loading` CLASS (not an exact previous-text match)
+      // is deliberate: this same flip-to-"Translating" now also fires after
+      // a rate-limited retry (see TRANSLATION_RATE_LIMITED below), whose
+      // slot was showing STATUS_RATE_LIMITED, not STATUS_QUEUED — both are
+      // still legitimately "loading" states this notification should
+      // resolve.
+      if (slotEl.classList.contains('is-loading')) {
+        slotEl.textContent = STATUS_TRANSLATING;
+      }
+    }
+    return;
+  }
+
+  if (message.type === MESSAGE_TYPES.TRANSLATION_RATE_LIMITED) {
+    // V1.0.2: background/index.js's withRetry hit a genuine HTTP 429 and is
+    // about to wait (intelligently — see that file) before its next retry
+    // attempt, which still goes through the exact same central queue. Purely
+    // an honesty affordance for the UI; do NOT clear pendingDispatchSlots
+    // here — the SAME requestId will fire another TRANSLATION_DISPATCHED
+    // once the retry actually dispatches.
+    const slots = pendingDispatchSlots.get(message.requestId);
+    if (!slots) return;
+    for (const slotEl of slots) {
+      if (slotEl.classList.contains('is-loading')) {
+        slotEl.textContent = STATUS_RATE_LIMITED;
+      }
     }
   }
 });
@@ -224,8 +293,14 @@ function withLocalDebugMarker(displayText, mode, sourceText) {
     : displayText;
 }
 
+// V1.0.2 PERFORMANCE PASS: now delegates to the SAME canonical key builder
+// the 15-day persistent cache uses (src/shared/translationCache.js) —
+// "ONE coherent... cache key" scheme shared by both layers, folding in
+// TRANSLATION_PROMPT_VERSION so a future prompt-methodology change (bumping
+// that constant) invalidates stale entries in both caches uniformly, with
+// nothing here needing to change.
 function cacheKeyForText(mode, text) {
-  return `${mode || 'prose'}::${text}`;
+  return buildTranslationCacheKey(mode, text);
 }
 
 function getCachedTranslation(mode, text) {
@@ -434,7 +509,7 @@ function renderResults(results, searchGeneration) {
   rendered.forEach(({ result, slots, card }, index) => {
     if (index < AUTO_TRANSLATE_COUNT) {
       // Still goes through the shared background queue — see background/
-      // index.js. Auto-translating the first 5 never means firing 5+ raw
+      // index.js. Auto-translating the first 3 never means firing 3+ raw
       // simultaneous Gemini calls.
       translateAllFieldsForCard(result, slots, searchGeneration);
     } else {
@@ -567,7 +642,7 @@ function appendPrimarySection(card, result, slots, rowCounter) {
   englishBlock.dir = 'ltr';
   englishBlock.lang = 'en';
   englishBlock.title = 'AI-generated translation — not Dorar’s own English wording.';
-  englishBlock.textContent = 'Queued…';
+  englishBlock.textContent = STATUS_QUEUED;
   slots.hadith = englishBlock;
   enCell.append(englishBlock);
 
@@ -662,7 +737,7 @@ function appendBilingualFieldRow(card, field, arabicValue, slots, mode, rowCount
   enValue.className = mode === 'name' ? 'translation-text name-english is-loading' : 'translation-text is-loading';
   enValue.dir = 'ltr';
   enValue.lang = 'en';
-  enValue.textContent = mode === 'name' ? '…' : 'Queued…';
+  enValue.textContent = mode === 'name' ? '…' : STATUS_QUEUED;
   slots[field.key] = enValue;
   enCell.append(enLabel, enValue);
 
@@ -704,7 +779,7 @@ function appendTakhrijRow(card, arabicValue, slots, rowCounter) {
   enValue.className = 'translation-text is-loading';
   enValue.dir = 'ltr';
   enValue.lang = 'en';
-  enValue.textContent = 'Queued…';
+  enValue.textContent = STATUS_QUEUED;
   slots.takhrij = enValue;
   enRow.append(enLabel, enValue);
 
@@ -984,7 +1059,7 @@ function renderSharhBody(body, arabicText, overlay, searchGeneration) {
     arabicEl.textContent = chunkText;
     chunkEl.appendChild(arabicEl);
 
-    const { wrap, slotEl } = renderInlineTranslation('Queued…');
+    const { wrap, slotEl } = renderInlineTranslation(STATUS_QUEUED);
     chunkEl.appendChild(wrap);
     body.appendChild(chunkEl);
 
@@ -1189,7 +1264,7 @@ function renderUsulField(label, arabicValue, mode, fieldItems, batchKey, localLo
   labelLine.append(labelEl, arabicEl);
   row.appendChild(labelLine);
 
-  const { wrap, slotEl } = renderInlineTranslation(mode === 'name' ? '…' : 'Queued…');
+  const { wrap, slotEl } = renderInlineTranslation(mode === 'name' ? '…' : STATUS_QUEUED);
   row.appendChild(wrap);
 
   fieldItems.push({ key: batchKey, arabicText: arabicValue, slotEl, mode, localLookupFn });
@@ -1228,13 +1303,133 @@ function resolveLocalNameField(fieldKey, value) {
   return null;
 }
 
+// ---------------------------------------------------------------------------
+// V1.0.2 PERFORMANCE PASS — safe in-flight request deduplication.
+//
+// FINAL SCOPE (per the explicit primary-Hadith-vs-Sharh/Usul clarification):
+// dedup applies to metadata (narrator, muhaddith, source, grading, takhrij),
+// to شرح (commentary) chunks (batch keys "sharh0", "sharh1", ... AND the
+// eager first chunk — see translateOneField), to أصول's own structured
+// Source field (batch key 'source', mode 'name' — the exact same
+// bibliographic-metadata nature as the main list's Source field, already
+// reuses lookupUsulSource), and to أصول's Wording field ('wording').
+//
+// NEVER dedup-eligible, by explicit, deliberate exclusion:
+//   - 'hadith' — the PRIMARY main-result Hadith text. This is the one field
+//     that must NEVER be in-flight-deduplicated, cross-result-deduplicated,
+//     or reused via anything other than an exact cache hit (session or
+//     15-day persistent) — see translateAllFieldsForCard, which never even
+//     calls attemptDedupFollow for this field.
+//   - 'chain' — أصول's Isnad/chain-of-narration field. Explicitly held to
+//     the SAME no-dedup policy as the primary Hadith field (still fully
+//     eligible for ordinary exact session/persistent CACHE reuse, just never
+//     in-flight-deduplicated against a concurrently-requested duplicate).
+// 'wording' (أصول's own Wording field) and شرح content are, by contrast,
+// EXPLICITLY approved for exact-text in-flight dedup — this is a narrower,
+// deliberate distinction from an earlier draft of this feature (which had
+// excluded wording/sharh too); this is the current, authoritative scope.
+//
+// Mechanism: if a caller is about to request a translation for a dedup-
+// eligible (mode, text) pair, and another request for the EXACT SAME pair
+// is already pending (owned by an earlier, still-in-flight caller within
+// this SAME tab/session), the caller becomes a "follower" — it creates NO
+// second network request at all, just awaits the owner's outcome and
+// applies it to its own slot once the owner settles. Exact string matching
+// only (via buildTranslationCacheKey, the SAME key scheme as both caches
+// use) — no fuzzy/similarity/semantic matching of any kind, anywhere.
+const pendingDedupRequests = new Map(); // dedup key -> { promise, resolve, reject }
+const DEDUP_ELIGIBLE_KEYS = new Set(['narrator', 'muhaddith', 'source', 'grading', 'takhrij', 'wording']);
+
+/** 'chain' and 'hadith' are intentionally NEVER eligible — see this
+ * section's file-level comment. شرح's chunk keys are dynamic ("sharh0",
+ * "sharh1", ... — one per chunk index, always distinct per chunk) so a
+ * prefix check is used instead of enumerating them in the Set above. */
+function isDedupEligible(fieldKey) {
+  if (DEDUP_ELIGIBLE_KEYS.has(fieldKey)) return true;
+  return typeof fieldKey === 'string' && fieldKey.startsWith('sharh');
+}
+
 /**
- * Translates one result's fields in ONE Gemini call (the batch endpoint),
- * after filtering out anything already in the content-keyed cache.
+ * For a dedup-eligible field: if an identical (mode, value) request is
+ * already pending, registers `slotEl` to receive that owner's eventual
+ * result and returns true — the caller must NOT create its own request for
+ * this field. Otherwise (not eligible, or no existing request) claims
+ * ownership as a side effect (a no-op for non-eligible fields) and returns
+ * false — the caller proceeds normally and becomes responsible for calling
+ * settleDedupRequest once it knows the outcome, from ANY resolution path
+ * (persistent-cache hit, Gemini success, or Gemini failure).
  */
-function translateAllFieldsForCard(result, slots, searchGeneration) {
+function attemptDedupFollow(fieldKey, mode, value, slotEl, searchGeneration) {
+  if (!isDedupEligible(fieldKey)) return false;
+
+  const key = buildTranslationCacheKey(mode, value);
+  const existing = pendingDedupRequests.get(key);
+  if (existing) {
+    // Follower: a real request for this exact text IS already in flight
+    // somewhere else on this page.
+    setTranslationContent(slotEl, STATUS_TRANSLATING, 'loading');
+    existing.promise.then(
+      (translation) => {
+        if (isResponseStale(searchGeneration)) return;
+        setTranslationContent(slotEl, translation, 'done');
+      },
+      () => {
+        if (isResponseStale(searchGeneration)) return;
+        markUnavailable(slotEl, mode);
+      },
+    );
+    return true;
+  }
+
+  // No one owns this key yet — claim it. The eventual owner (whichever
+  // function actually resolves this field) calls settleDedupRequest.
+  let resolveFn;
+  let rejectFn;
+  const promise = new Promise((resolve, reject) => {
+    resolveFn = resolve;
+    rejectFn = reject;
+  });
+  promise.catch(() => {}); // avoid an unhandled-rejection warning if no follower ever attaches
+  pendingDedupRequests.set(key, { promise, resolve: resolveFn, reject: rejectFn });
+  return false;
+}
+
+/**
+ * Settles (and removes) the pending dedup slot for (mode, value), if this
+ * field is dedup-eligible and a slot is actually owned here — a safe no-op
+ * otherwise. Called UNCONDITIONALLY on every resolution path (persistent-
+ * cache hit, Gemini success, Gemini failure) and regardless of whether the
+ * response is "stale" (see the generation note) — the underlying translated
+ * text is valid, reusable content independent of which search generation
+ * originally asked for it; only DOM writes are ever gated on staleness.
+ */
+function settleDedupRequest(fieldKey, mode, value, outcome, isError) {
+  if (!isDedupEligible(fieldKey)) return;
+  const key = buildTranslationCacheKey(mode, value);
+  const entry = pendingDedupRequests.get(key);
+  if (!entry) return;
+  pendingDedupRequests.delete(key);
+  if (isError) entry.reject(outcome);
+  else entry.resolve(outcome);
+}
+
+/**
+ * Translates one result's fields, in up to three passes:
+ *   PASS 1 (sync):  session cache -> local dictionary -> dedup claim/follow.
+ *                   Must stay fully synchronous so concurrently-rendered
+ *                   cards (the auto-translate burst, or several lazy cards
+ *                   intersecting together) see a race-free, consistent view
+ *                   of "who owns this request" — see attemptDedupFollow.
+ *   PASS 2 (async): 15-day persistent-cache lookup for whatever PASS 1
+ *                   didn't resolve and this card actually OWNS (never for a
+ *                   dedup follower, which is already being handled above).
+ *   PASS 3:         whatever PASS 2 didn't resolve goes to Gemini in ONE
+ *                   batch call, exactly as before this pass.
+ */
+async function translateAllFieldsForCard(result, slots, searchGeneration) {
   const fieldsToRequest = {};
   const slotInfoByKey = {};
+  const persistentCandidates = []; // { key, mode, value, slotEl }
 
   for (const field of PROSE_FIELDS) {
     const value = result[field.resultProp];
@@ -1279,8 +1474,12 @@ function translateAllFieldsForCard(result, slots, searchGeneration) {
       }
     }
 
-    fieldsToRequest[field.key] = value;
-    slotInfoByKey[field.key] = { slotEl, mode: undefined, value };
+    // NOTE: hadith (field.key === 'hadith') is never dedup-eligible — see
+    // DEDUP_ELIGIBLE_KEYS above; attemptDedupFollow is a guaranteed no-op
+    // (always returns false) for it, exactly preserving prior behavior.
+    if (!attemptDedupFollow(field.key, undefined, value, slotEl, searchGeneration)) {
+      persistentCandidates.push({ key: field.key, mode: undefined, value, slotEl });
+    }
   }
 
   for (const field of NAME_FIELDS) {
@@ -1307,21 +1506,56 @@ function translateAllFieldsForCard(result, slots, searchGeneration) {
       continue;
     }
 
-    fieldsToRequest[field.key] = value;
-    slotInfoByKey[field.key] = { slotEl, mode: 'name', value };
+    if (!attemptDedupFollow(field.key, 'name', value, slotEl, searchGeneration)) {
+      persistentCandidates.push({ key: field.key, mode: 'name', value, slotEl });
+    }
+  }
+
+  if (persistentCandidates.length === 0) return; // everything resolved locally/from cache, or handed off to a dedup owner
+
+  // PASS 2 (async): 15-day persistent-cache lookup, only for fields this
+  // card actually owns. Never blocks rendering — the card is already on
+  // screen; this only delays dispatch of whatever's still genuinely unknown
+  // by a few targeted, parallel storage reads.
+  await Promise.all(
+    persistentCandidates.map(async (c) => {
+      c.persistentHit = await getPersistentTranslation(c.mode, c.value);
+    }),
+  );
+
+  for (const c of persistentCandidates) {
+    if (c.persistentHit) {
+      setCachedTranslation(c.mode, c.value, c.persistentHit);
+      setTranslationContent(c.slotEl, c.persistentHit, 'done');
+      settleDedupRequest(c.key, c.mode, c.value, c.persistentHit, false);
+      continue;
+    }
+    fieldsToRequest[c.key] = c.value;
+    slotInfoByKey[c.key] = { slotEl: c.slotEl, mode: c.mode, value: c.value };
   }
 
   const keysToRequest = Object.keys(fieldsToRequest);
-  if (keysToRequest.length === 0) return; // everything was already cached
+  if (keysToRequest.length === 0) return; // fully resolved by the persistent cache
 
   for (const key of keysToRequest) {
     const { slotEl, mode } = slotInfoByKey[key];
-    setTranslationContent(slotEl, mode === 'name' ? '…' : 'Queued…', 'loading');
+    setTranslationContent(slotEl, mode === 'name' ? '…' : STATUS_QUEUED, 'loading');
   }
 
   runBatchTranslation(fieldsToRequest, slotInfoByKey, searchGeneration);
 }
 
+/**
+ * V1.0.2 PERFORMANCE PASS: cache writes (session + 15-day persistent) and
+ * dedup settlement now happen UNCONDITIONALLY — a good, faithful
+ * translation is valid, reusable content regardless of which search
+ * generation originally asked for it, and a dedup follower's promise must
+ * be settled even if the owning card's search has since gone stale
+ * (otherwise it would hang forever — see attemptDedupFollow). Only the DOM
+ * write (setTranslationContent) is still gated on isResponseStale, exactly
+ * as before — a stale response still can never modify the new search's
+ * page.
+ */
 async function runBatchTranslation(fieldsToRequest, slotInfoByKey, searchGeneration) {
   const requestId = nextRequestId++;
   registerPendingDispatch(
@@ -1339,12 +1573,6 @@ async function runBatchTranslation(fieldsToRequest, slotInfoByKey, searchGenerat
     });
     clearPendingDispatch(requestId);
 
-    // STALE-QUEUE FIX: a newer search may have started while this request
-    // was queued/in flight. Discard the result entirely — touch neither the
-    // cache nor the DOM — rather than let an old search's response corrupt
-    // whatever the user is looking at now.
-    if (isResponseStale(searchGeneration)) return;
-
     if (!response || !response.ok) {
       throw new Error(response?.error || 'unknown error');
     }
@@ -1354,16 +1582,28 @@ async function runBatchTranslation(fieldsToRequest, slotInfoByKey, searchGenerat
       const { slotEl, mode, value } = slotInfoByKey[key];
       const translation = translatedFields[key];
       if (typeof translation === 'string' && translation.trim()) {
-        setCachedTranslation(mode, value, translation.trim());
-        setTranslationContent(slotEl, translation.trim(), 'done');
+        const trimmed = translation.trim();
+        setCachedTranslation(mode, value, trimmed);
+        setPersistentTranslation(mode, value, trimmed); // fire-and-forget — never awaited on the UI path
+        settleDedupRequest(key, mode, value, trimmed, false);
+        if (!isResponseStale(searchGeneration)) {
+          setTranslationContent(slotEl, trimmed, 'done');
+        }
       } else {
         // The model omitted this one key — treat it individually as
         // unavailable rather than failing the whole card.
-        markUnavailable(slotEl, mode);
+        settleDedupRequest(key, mode, value, new Error('Model omitted this field.'), true);
+        if (!isResponseStale(searchGeneration)) {
+          markUnavailable(slotEl, mode);
+        }
       }
     }
   } catch (err) {
     clearPendingDispatch(requestId);
+    for (const key of Object.keys(fieldsToRequest)) {
+      const { mode, value } = slotInfoByKey[key];
+      settleDedupRequest(key, mode, value, err, true);
+    }
     if (isResponseStale(searchGeneration)) return; // stale failure — never touch a newer search's DOM either
     // The background already retried transiently-failing requests before
     // giving up (see background/index.js's withRetry) — reaching here means
@@ -1394,9 +1634,20 @@ async function runBatchTranslation(fieldsToRequest, slotInfoByKey, searchGenerat
 
 const FIELD_GROUP_BATCH_MAX_FIELDS = 8; // mirrors worker/src/index.js's BATCH_MAX_FIELDS
 
+/**
+ * V1.0.2 PERFORMANCE PASS: same three-pass structure as
+ * translateAllFieldsForCard above (sync cache/local/dedup pass, then an
+ * async 15-day persistent-cache pass for whatever this call owns, then
+ * whatever's left goes to Gemini). Dedup eligibility is decided per-item via
+ * isDedupEligible(item.key) — this correctly includes أصول's own 'source'
+ * and 'wording' fields and شرح's "sharh0"/"sharh1"/... keys, while excluding
+ * أصول's 'chain' field (held to the same no-dedup policy as the primary
+ * Hadith field — see DEDUP_ELIGIBLE_KEYS's file-level comment).
+ */
 async function translateFieldGroup(items, searchGeneration) {
   const toRequest = {};
   const infoByKey = {};
+  const persistentCandidates = []; // { key, mode, arabicText, slotEl }
 
   for (const item of items) {
     const { key, arabicText, slotEl, mode, localLookupFn } = item;
@@ -1417,16 +1668,36 @@ async function translateFieldGroup(items, searchGeneration) {
       }
     }
 
-    toRequest[key] = arabicText;
-    infoByKey[key] = { slotEl, mode, arabicText };
+    if (!attemptDedupFollow(key, mode, arabicText, slotEl, searchGeneration)) {
+      persistentCandidates.push({ key, mode, arabicText, slotEl });
+    }
+  }
+
+  if (persistentCandidates.length === 0) return; // everything cached/local/handed to a dedup owner
+
+  await Promise.all(
+    persistentCandidates.map(async (c) => {
+      c.persistentHit = await getPersistentTranslation(c.mode, c.arabicText);
+    }),
+  );
+
+  for (const c of persistentCandidates) {
+    if (c.persistentHit) {
+      setCachedTranslation(c.mode, c.arabicText, c.persistentHit);
+      setTranslationContent(c.slotEl, c.persistentHit, 'done');
+      settleDedupRequest(c.key, c.mode, c.arabicText, c.persistentHit, false);
+      continue;
+    }
+    toRequest[c.key] = c.arabicText;
+    infoByKey[c.key] = { slotEl: c.slotEl, mode: c.mode, arabicText: c.arabicText };
   }
 
   const keys = Object.keys(toRequest);
-  if (keys.length === 0) return; // everything was cached or resolved locally
+  if (keys.length === 0) return; // fully resolved by the persistent cache
 
   for (const key of keys) {
     const { slotEl, mode } = infoByKey[key];
-    setTranslationContent(slotEl, mode === 'name' ? '…' : 'Queued…', 'loading');
+    setTranslationContent(slotEl, mode === 'name' ? '…' : STATUS_QUEUED, 'loading');
   }
 
   // Defensive split: keeps every single /translate-batch call within the
@@ -1442,6 +1713,8 @@ async function translateFieldGroup(items, searchGeneration) {
   );
 }
 
+/** See runBatchTranslation's identical comment: cache writes + dedup
+ * settlement happen unconditionally; only the DOM write is staleness-gated. */
 async function runFieldGroupBatch(batchKeys, toRequest, infoByKey, searchGeneration) {
   const fieldsToRequest = {};
   for (const key of batchKeys) {
@@ -1463,7 +1736,6 @@ async function runFieldGroupBatch(batchKeys, toRequest, infoByKey, searchGenerat
       requestId,
     });
     clearPendingDispatch(requestId);
-    if (isResponseStale(searchGeneration)) return; // see runBatchTranslation's identical gate
 
     if (!response || !response.ok) {
       throw new Error(response?.error || 'unknown error');
@@ -1474,14 +1746,26 @@ async function runFieldGroupBatch(batchKeys, toRequest, infoByKey, searchGenerat
       const { slotEl, mode, arabicText } = infoByKey[key];
       const translation = translatedFields[key];
       if (typeof translation === 'string' && translation.trim()) {
-        setCachedTranslation(mode, arabicText, translation.trim());
-        setTranslationContent(slotEl, translation.trim(), 'done');
+        const trimmed = translation.trim();
+        setCachedTranslation(mode, arabicText, trimmed);
+        setPersistentTranslation(mode, arabicText, trimmed);
+        settleDedupRequest(key, mode, arabicText, trimmed, false);
+        if (!isResponseStale(searchGeneration)) {
+          setTranslationContent(slotEl, trimmed, 'done');
+        }
       } else {
-        markUnavailable(slotEl, mode);
+        settleDedupRequest(key, mode, arabicText, new Error('Model omitted this field.'), true);
+        if (!isResponseStale(searchGeneration)) {
+          markUnavailable(slotEl, mode);
+        }
       }
     }
   } catch (err) {
     clearPendingDispatch(requestId);
+    for (const key of batchKeys) {
+      const { mode, arabicText } = infoByKey[key];
+      settleDedupRequest(key, mode, arabicText, err, true);
+    }
     if (isResponseStale(searchGeneration)) return;
     console.error('Grouped batch translation failed:', err); // dev-visible only
     for (const key of batchKeys) {
@@ -1493,9 +1777,18 @@ async function runFieldGroupBatch(batchKeys, toRequest, infoByKey, searchGenerat
 
 /**
  * Used by شرح / أصول content, which is fetched on demand rather than known
- * up front — one field/chunk at a time, still content-cached.
+ * up front — one field/chunk at a time, still content-cached. NOTE: in
+ * practice this is only ever called for شرح's eager first chunk (see
+ * renderSharhBody). That content IS dedup-eligible (see the "sharh" prefix
+ * rule in isDedupEligible) — this uses a fixed label, 'sharh-eager', purely
+ * to gate eligibility (it is never part of the actual dedup key itself,
+ * which is built from the real mode+text — see attemptDedupFollow/
+ * settleDedupRequest). This function is never used for the primary Hadith
+ * field or أصول's Chain field — both stay excluded via DEDUP_ELIGIBLE_KEYS.
  */
 async function translateOneField(debugLabel, arabicText, slotEl, mode, localLookupFn, searchGeneration) {
+  const dedupFieldKey = 'sharh-eager';
+
   const cached = getCachedTranslation(mode, arabicText);
   if (cached) {
     setTranslationContent(slotEl, withLocalDebugMarker(cached, mode, arabicText), 'done');
@@ -1518,7 +1811,20 @@ async function translateOneField(debugLabel, arabicText, slotEl, mode, localLook
     }
   }
 
-  setTranslationContent(slotEl, mode === 'name' ? '…' : 'Queued…', 'loading');
+  if (attemptDedupFollow(dedupFieldKey, mode, arabicText, slotEl, searchGeneration)) {
+    return; // a real request for this exact شرح text is already in flight elsewhere on the page
+  }
+
+  // 15-day persistent cache — checked before ever creating a Gemini task.
+  const persistentHit = await getPersistentTranslation(mode, arabicText);
+  if (persistentHit) {
+    setCachedTranslation(mode, arabicText, persistentHit);
+    setTranslationContent(slotEl, persistentHit, 'done');
+    settleDedupRequest(dedupFieldKey, mode, arabicText, persistentHit, false);
+    return;
+  }
+
+  setTranslationContent(slotEl, mode === 'name' ? '…' : STATUS_QUEUED, 'loading');
 
   const requestId = nextRequestId++;
   registerPendingDispatch(requestId, [slotEl]);
@@ -1533,15 +1839,19 @@ async function translateOneField(debugLabel, arabicText, slotEl, mode, localLook
       requestId,
     });
     clearPendingDispatch(requestId);
-    if (isResponseStale(searchGeneration)) return; // see runBatchTranslation's identical gate
 
     if (!response || !response.ok) {
       throw new Error(response?.error || 'unknown error');
     }
     setCachedTranslation(mode, arabicText, response.translation);
-    setTranslationContent(slotEl, response.translation, 'done');
+    setPersistentTranslation(mode, arabicText, response.translation); // fire-and-forget
+    settleDedupRequest(dedupFieldKey, mode, arabicText, response.translation, false);
+    if (!isResponseStale(searchGeneration)) {
+      setTranslationContent(slotEl, response.translation, 'done');
+    }
   } catch (err) {
     clearPendingDispatch(requestId);
+    settleDedupRequest(dedupFieldKey, mode, arabicText, err, true);
     if (isResponseStale(searchGeneration)) return;
     console.error(`Translation failed (${debugLabel}):`, err); // dev-visible only
     markUnavailable(slotEl, mode);

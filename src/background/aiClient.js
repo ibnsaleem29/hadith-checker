@@ -88,7 +88,25 @@ async function callWorker(path, body) {
     } catch {
       // response wasn't JSON — ignore, use the plain status
     }
-    throw new Error(`Translation service returned HTTP ${response.status}${detail}`);
+    const err = new Error(`Translation service returned HTTP ${response.status}${detail}`);
+    // V1.0.2 PERFORMANCE PASS: carry the real HTTP status (and, for a 429, a
+    // parsed Retry-After delay if the Worker sent one — see
+    // worker/src/index.js's handleModelError) onto the thrown Error so
+    // background/index.js's withRetry can react intelligently to a genuine
+    // rate-limit condition instead of treating every failure identically.
+    // Only the simple "delay-seconds" form of Retry-After is parsed (not
+    // the HTTP-date form) — deliberately simple, per the requirement to
+    // keep this mechanism lightweight; an unparseable/absent header just
+    // means withRetry falls back to its own sensible bounded default.
+    err.status = response.status;
+    if (response.status === 429) {
+      const retryAfterHeader = response.headers.get('Retry-After');
+      const seconds = retryAfterHeader ? Number(retryAfterHeader) : NaN;
+      if (Number.isFinite(seconds) && seconds >= 0) {
+        err.retryAfterMs = seconds * 1000;
+      }
+    }
+    throw err;
   }
 
   return response.json();

@@ -241,6 +241,49 @@ function notifyDispatched(tabId, requestId) {
 }
 
 /**
+ * V1.0.2 PERFORMANCE PASS: same one-way, best-effort delivery pattern as
+ * notifyDispatched above, sent right before withRetry sleeps ahead of a
+ * retry it knows was caused by a genuine 429 — see TRANSLATION_RATE_LIMITED
+ * in shared/constants.js.
+ */
+function notifyRateLimited(tabId, requestId) {
+  if (tabId === undefined) return;
+  try {
+    chrome.tabs.sendMessage(tabId, { type: MESSAGE_TYPES.TRANSLATION_RATE_LIMITED, requestId }).catch(() => {});
+  } catch {
+    // non-fatal, same reasoning as notifyDispatched
+  }
+}
+
+// ---------------------------------------------------------------------------
+// V1.0.2 PERFORMANCE PASS — intelligent 429 backoff.
+//
+// Every OTHER failure (network error, 5xx, timeout, malformed response) still
+// uses the existing plain linear delay below (TRANSLATION_RETRY_BASE_DELAY_MS
+// * attempt) — completely unchanged. Only a genuine HTTP 429 (now
+// distinguishable via err.status, threaded through from aiClient.js/the
+// Worker — see those files) gets this different, bounded delay:
+//   - use the Worker's real Retry-After value if it provided one (err.retryAfterMs),
+//   - clamped to a sane range so a single misbehaving/huge Retry-After value
+//     can never itself become a long stall — NOT an arbitrary flat 60s wait;
+//   - or a fixed, modest default if no Retry-After was available at all.
+// Either way, the retry still re-enters the exact same enqueueTranslationTask
+// -> pumpTranslationQueue path as any other attempt, so it is still fully
+// subject to the 5-concurrent cap and the 12-RPM sliding window — this only
+// changes HOW LONG withRetry waits before making that next attempt, never
+// whether the RPM/concurrency limiter applies to it.
+// ---------------------------------------------------------------------------
+const RATE_LIMIT_MIN_DELAY_MS = 2000;
+const RATE_LIMIT_MAX_DELAY_MS = 10000;
+const RATE_LIMIT_DEFAULT_DELAY_MS = 4000;
+
+function rateLimitDelayMs(err) {
+  const suggested = err && err.retryAfterMs;
+  if (!Number.isFinite(suggested) || suggested <= 0) return RATE_LIMIT_DEFAULT_DELAY_MS;
+  return Math.min(Math.max(suggested, RATE_LIMIT_MIN_DELAY_MS), RATE_LIMIT_MAX_DELAY_MS);
+}
+
+/**
  * Runs makeCallFn, retrying up to TRANSLATION_MAX_RETRIES times (linear
  * backoff) before giving up — distinguishes "this one request had a hiccup"
  * (transient network blip, 429, 5xx) from "this content is genuinely
@@ -251,12 +294,25 @@ function notifyDispatched(tabId, requestId) {
  * error — it flows straight back out on the first attempt without ever
  * entering the catch/retry branch below, so an invalidated task is never
  * retried.
+ *
+ * V1.0.2 PERFORMANCE PASS: on a genuine 429 (err.status === 429 — see
+ * aiClient.js/worker/src/index.js), the delay before the NEXT attempt uses
+ * rateLimitDelayMs() instead of the plain linear delay, and the owning tab
+ * is notified (notifyRateLimited) so the UI can show a truthful "temporarily
+ * delayed" state rather than a generic one. Every other failure kind is
+ * completely unaffected — same linear delay, no notification, exactly as
+ * before this pass.
  */
 async function withRetry(makeCallFn, tabId, generation, requestId) {
   let lastError;
   for (let attempt = 0; attempt <= TRANSLATION_MAX_RETRIES; attempt += 1) {
     if (attempt > 0) {
-      await sleep(TRANSLATION_RETRY_BASE_DELAY_MS * attempt);
+      if (lastError && lastError.status === 429) {
+        notifyRateLimited(tabId, requestId);
+        await sleep(rateLimitDelayMs(lastError));
+      } else {
+        await sleep(TRANSLATION_RETRY_BASE_DELAY_MS * attempt);
+      }
     }
     try {
       return await enqueueTranslationTask(makeCallFn, tabId, generation, requestId);
