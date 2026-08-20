@@ -58,6 +58,14 @@
 // "ابن جرير الطبري" is a DISTINCT person from the existing "al-Tabarani"
 // entry (الطبراني, compiler of the المعاجم) — no relation, no conflict,
 // kept as fully separate entries.
+//
+// FINAL V1.0.2 lookup-addition request: "ابن عبد البر" -> "Ibn ʿAbd al-Barr"
+// was requested as a new addition. Inspected first per instruction — the
+// exact Arabic form "ابن عبد البر" already existed below (added in an
+// earlier expansion pass) as "Ibn Abd al-Barr" (no ʿayn mark). Rather than
+// add a second, duplicate entry for the identical Arabic key, the existing
+// entry's English text was updated in place to the requested "Ibn ʿAbd
+// al-Barr" — no duplicate created, no new Arabic key added.
 export const SCHOLARS = [
   { en: 'Abu Hatim al-Razi', forms: ['أبو حاتم الرازي'] },
   { en: 'Ibn Jarir al-Tabari', forms: ['ابن جرير الطبري'] },
@@ -89,7 +97,7 @@ export const SCHOLARS = [
   { en: 'Abd al-Razzaq al-Sanani', forms: ['عبد الرزاق الصنعاني'] },
   { en: 'Ibn Abi Shaybah', forms: ['ابن أبي شيبة'] },
   { en: 'al-Khatib al-Baghdadi', forms: ['الخطيب البغدادي'] },
-  { en: 'Ibn Abd al-Barr', forms: ['ابن عبد البر'] },
+  { en: 'Ibn ʿAbd al-Barr', forms: ['ابن عبد البر'] },
   { en: 'al-Mizzi', forms: ['المزي'] },
   { en: 'Ibn al-Salah', forms: ['ابن الصلاح'] },
   { en: 'al-Nawawi', forms: ['النووي'] },

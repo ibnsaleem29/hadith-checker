@@ -62,6 +62,11 @@
 // الترمذي). "الاعتبار في الناسخ والمنسوخ" was investigated and explicitly
 // REJECTED — no matching book id was found and no live occurrence was
 // confirmed — so it is deliberately NOT added here.
+//
+// FINAL V1.0.2 lookup-addition request: "الاستذكار" -> "al-Istidhkar"
+// (Ibn ʿAbd al-Barr's Maliki commentary on al-Muwatta). Inspected first —
+// no existing entry (under this or any other spelling) matched; added as a
+// genuinely new entry, not a duplicate.
 export const SOURCES = [
   { en: 'Ilal Ibn Abi Hatim', forms: ['علل ابن أبي حاتم'] },
   { en: 'Tarikh al-Tabari', forms: ['تاريخ الطبري'] },
@@ -132,4 +137,5 @@ export const SOURCES = [
   { en: 'al-Tahrir wa al-Tanwir', forms: ['التحرير والتنوير'] },
   { en: 'Lisan al-Mizan', forms: ['لسان الميزان'] },
   { en: 'al-Ahadith al-Mukhtarah', forms: ['الأحاديث المختارة'] },
+  { en: 'al-Istidhkar', forms: ['الاستذكار'] },
 ];
