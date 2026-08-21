@@ -1,6 +1,12 @@
 # Hadith Checker [English & Arabic] - Chrome Extension
 
-Research Hadith directly from your chromium based browsers [e.g chrome/brave/etc] and view relevant results with Arabic text, English translation, **narrator information, Muhaddith, number of books your hadith has actually been recorded in, their authenticity/grading, explanation of what the hadith means and more!** 
+<img width="1392" height="557" alt="image" src="https://github.com/user-attachments/assets/ac2af5e4-7296-4597-acf2-477b4fe4004c" />
+
+
+
+.
+
+Research Hadith directly from your chromium based browsers [e.g chrome/brave/Edge/Opera/etc] and view relevant results with Arabic text, English translation, **narrator information, Muhaddith, number of books your hadith has actually been recorded in, their authenticity/grading, explanation of what the hadith means and more!** 
 
 The extension also provides access to **Hadith explanation, similar Hadith, Hadith principles (Usul al-Hadith)**, and related contextual information where available all from dorar.net.
 
@@ -13,7 +19,6 @@ Hadith Checker is designed as a convenient research and reference tool for users
 
 
 # **SEE HOW IT WORKS**
----
 
 
 
@@ -56,8 +61,13 @@ Scroll down till you see the section **Assets** and download the zip file, then 
 
 
 
-# Alternatively get this extension for Claude as well
+# Or you may also use this extension for Claude as well
 ---
+
+<img width="1392" height="557" alt="image" src="https://github.com/user-attachments/assets/ea91c690-fd98-4c6d-b99b-7752e034acf7" />
+
+
+.
 
 To Install the same purpose extension for Claude desktop download the extension from: https://github.com/ibnsaleem29/dorar-hadith-mcp/releases
 
