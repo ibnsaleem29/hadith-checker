@@ -34,7 +34,7 @@ Hadith Checker is designed as a convenient research and reference tool for users
 
 
 
-# Install it from the Chrome Web Store
+# Install it on your Chrome/Opera/Edge/Brave browsers from the Chrome Web Store
 ---
 
 
@@ -48,10 +48,19 @@ Link: https://chromewebstore.google.com/detail/hadith-checker-english-ar/oodkfbf
 
 
 
+
 # Alternate method to Install:
 ---
 
 Scroll down till you see the section **Assets** and download the zip file, then open your chrome/brave any chromium based browser, go to extensions [or copy paste this: **chrome://extensions**] and select **_Load Unpacked_** option from the top left and then upload the zip file you downloaded from this page [_hadith-checker-english-arabic-1.0.1.zip_]
+
+
+
+# Alternatively get this extension for Claude as well
+---
+
+To Install the same purpose extension for Claude desktop download the extension from: https://github.com/ibnsaleem29/dorar-hadith-mcp/releases
+
 
 
 # For feedback/bugs reach out through: 
